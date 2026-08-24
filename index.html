@@ -398,6 +398,7 @@ let state = {
   injuries:[],         // array of injury ids
   overrides:[],         // exercise ids user chose to keep despite injury
   unit:'kg',            // 'kg' or 'lb' — display/input unit; all weights are stored internally in kg
+  heightUnit:'cm',      // 'cm' or 'in' — display/input unit; height is stored internally in cm
   theme:'dark',         // 'dark' or 'light'
   _exerciseExpanded:{},  // uid -> bool override; undefined = auto (collapsed once all sets are filled)
   _showAllFoodLog:false,
@@ -498,6 +499,37 @@ function fromDisplayWeight(val){
   const n = Number(val); if(isNaN(n)) return '';
   return state.unit==='lb' ? lbToKg(n) : n;
 }
+// Per-exercise weight unit override — defaults to your global Settings unit, but can be
+// flipped for just one exercise (e.g. a machine stack labeled in lbs at an otherwise-kg gym)
+// without changing anything else.
+function exerciseWeightUnit(e){ return e.weightUnit || state.unit; }
+function toDisplayWeightForUnit(kg, unit){
+  if(kg==='' || kg==null) return '';
+  const n = Number(kg); if(isNaN(n)) return '';
+  const v = unit==='lb' ? kgToLb(n) : n;
+  return (Math.round(v*10)/10).toString();
+}
+function fromDisplayWeightForUnit(val, unit){
+  if(val==='' || val==null) return '';
+  const n = Number(val); if(isNaN(n)) return '';
+  return unit==='lb' ? lbToKg(n) : n;
+}
+
+const CM_PER_IN = 2.54;
+function cmToIn(cm){ return cm/CM_PER_IN; }
+function inToCm(inches){ return inches*CM_PER_IN; }
+function heightUnitLabel(){ return state.heightUnit==='in' ? 'in' : 'cm'; }
+function toDisplayHeight(cm){
+  if(cm==='' || cm==null) return '';
+  const n = Number(cm); if(isNaN(n)) return '';
+  const v = state.heightUnit==='in' ? cmToIn(n) : n;
+  return (Math.round(v*10)/10).toString();
+}
+function fromDisplayHeight(val){
+  if(val==='' || val==null) return '';
+  const n = Number(val); if(isNaN(n)) return '';
+  return state.heightUnit==='in' ? inToCm(n) : n;
+}
 
 const KM_PER_MI = 1.609344;
 function kmToMi(km){ return km/KM_PER_MI; }
@@ -572,6 +604,7 @@ async function loadUserData(){
       state.injuries = d.injuries||[];
       state.overrides = d.overrides||[];
       state.unit = d.unit==='lb' ? 'lb' : 'kg';
+      state.heightUnit = d.heightUnit==='in' ? 'in' : 'cm';
       state.theme = d.theme==='light' ? 'light' : 'dark';
       state.distanceUnit = d.distanceUnit==='mi' ? 'mi' : 'km';
       state.customExercises = d.customExercises||[];
@@ -595,7 +628,7 @@ let saveTimeout=null;
 let saveRetryTimeout=null;
 function buildSavePayload(){
   return {
-    sessions:state.sessions, injuries:state.injuries, overrides:state.overrides, unit:state.unit, theme:state.theme, customExercises:state.customExercises,
+    sessions:state.sessions, injuries:state.injuries, overrides:state.overrides, unit:state.unit, heightUnit:state.heightUnit, theme:state.theme, customExercises:state.customExercises,
     customHyroxStations:state.customHyroxStations,
     distanceUnit:state.distanceUnit, gear:state.gear, gearNotified80:state.gearNotified80,
     nutritionProfile:state.nutritionProfile, activityQ:state.activityQ, weightLogs:state.weightLogs,
@@ -1065,7 +1098,7 @@ function removeSetRow(exUid, idx){
 }
 function updateSetField(exUid, idx, field, value){
   const ctx = findExerciseContext(exUid); if(!ctx) return;
-  const stored = field==='weight' ? fromDisplayWeight(value) : value;
+  const stored = field==='weight' ? fromDisplayWeightForUnit(value, exerciseWeightUnit(ctx.exercise)) : value;
   ctx.exercise.sets[idx][field]=stored;
   if(field==='weight'||field==='reps') ctx.exercise.sets[idx].filled = ctx.exercise.sets[idx].weight!=='' && ctx.exercise.sets[idx].reps!=='';
   saveData();
@@ -1888,8 +1921,16 @@ function onboardingStep2(){
   return `
     <p class="card-title">Set up your nutrition (optional)</p>
     <p class="small muted" style="margin-top:0;">A minute now unlocks your calorie and macro targets from day one. Skip if you'd rather do this later — it's always in Nutrition → Setup.</p>
-    <div class="row wrap" style="gap:8px;margin-top:12px;">
-      <div style="flex:1;min-width:90px;"><label class="tiny muted">Height (cm)</label><input type="text" inputmode="numeric" value="${p.heightCm}" id="onboarding-height"></div>
+    <div class="row wrap" style="gap:6px;margin-top:10px;">
+      <span class="tiny muted" style="margin-right:2px;">Units:</span>
+      <button class="chip small ${state.heightUnit==='cm'?'active':''}" data-height-unit="cm">cm</button>
+      <button class="chip small ${state.heightUnit==='in'?'active':''}" data-height-unit="in">in</button>
+      <span class="tiny muted" style="margin:0 2px 0 6px;">·</span>
+      <button class="chip small ${state.unit==='kg'?'active':''}" data-unit="kg">kg</button>
+      <button class="chip small ${state.unit==='lb'?'active':''}" data-unit="lb">lb</button>
+    </div>
+    <div class="row wrap" style="gap:8px;margin-top:10px;">
+      <div style="flex:1;min-width:90px;"><label class="tiny muted">Height (${heightUnitLabel()})</label><input type="text" inputmode="decimal" value="${toDisplayHeight(p.heightCm)}" id="onboarding-height"></div>
       <div style="flex:1;min-width:70px;"><label class="tiny muted">Age</label><input type="text" inputmode="numeric" value="${p.age}" id="onboarding-age"></div>
       <div style="flex:1;min-width:90px;"><label class="tiny muted">Weight (${unitLabel()})</label><input type="text" inputmode="decimal" id="onboarding-weight"></div>
     </div>
@@ -1898,12 +1939,29 @@ function onboardingStep2(){
       <button class="chip small ${p.sex==='male'?'active':''}" data-onboarding-sex="male">Male</button>
       <button class="chip small ${p.sex==='female'?'active':''}" data-onboarding-sex="female">Female</button>
     </div>
+    <div class="row wrap" style="gap:8px;margin-top:10px;">
+      <div style="flex:1;min-width:110px;"><label class="tiny muted">Steps/day (avg)</label><input type="text" inputmode="numeric" value="${state.activityQ.stepsPerDay}" id="onboarding-steps"></div>
+      <div style="flex:1;min-width:110px;"><label class="tiny muted">Other sports (hrs/wk)</label><input type="text" inputmode="decimal" value="${state.activityQ.otherSportsHours}" id="onboarding-sports"></div>
+    </div>
+    <p class="tiny muted" style="margin:4px 0 0 0;">"Other sports" means anything outside Gym/Run/Bike/Swim/Hyrox — those already count automatically from what you log.</p>
     <label class="tiny muted" style="display:block;margin-top:10px;">Goal</label>
     <div class="row wrap" style="gap:8px;margin-top:4px;">
       <button class="chip small ${p.goal==='cut'?'active':''}" data-onboarding-goal="cut">Cutting</button>
       <button class="chip small ${p.goal==='maintain'?'active':''}" data-onboarding-goal="maintain">Maintaining</button>
       <button class="chip small ${p.goal==='bulk'?'active':''}" data-onboarding-goal="bulk">Bulking</button>
     </div>
+    ${p.goal==='cut' ? `
+      <label class="tiny muted" style="display:block;margin-top:10px;">Rate of loss</label>
+      <div class="row wrap" style="gap:8px;margin-top:4px;">
+        ${[0.25,0.5,0.75,1.0].map(r=>`<button class="chip small ${Number(p.weeklyRateKg)===r?'active':''}" data-onboarding-rate="${r}">${toDisplayWeight(r)} ${unitLabel()}/wk</button>`).join('')}
+      </div>
+    ` : ''}
+    ${p.goal==='bulk' ? `
+      <label class="tiny muted" style="display:block;margin-top:10px;">Rate of gain</label>
+      <div class="row wrap" style="gap:8px;margin-top:4px;">
+        ${[0.1,0.25,0.5].map(r=>`<button class="chip small ${Number(p.weeklyRateKg)===r?'active':''}" data-onboarding-rate="${r}">${toDisplayWeight(r)} ${unitLabel()}/wk</button>`).join('')}
+      </div>
+    ` : ''}
     <button class="btn btn-accent btn-block" id="onboarding-step2-done" style="margin-top:18px;padding:14px;">Save & Finish</button>
     <button class="btn btn-ghost btn-block" id="onboarding-step2-skip" style="margin-top:8px;">Skip for now</button>
   `;
@@ -1919,14 +1977,30 @@ function attachOnboardingHandlers(){
   const step1Skip = document.getElementById('onboarding-step1-skip');
   if(step1Skip) step1Skip.onclick=()=>{ state._onboardingStep=2; render(); };
 
+  document.querySelectorAll('[data-height-unit]').forEach(el=>el.onclick=()=>{
+    if(state.heightUnit===el.dataset.heightUnit) return;
+    state.heightUnit = el.dataset.heightUnit;
+    saveData(); render();
+  });
+  document.querySelectorAll('[data-unit]').forEach(el=>el.onclick=()=>{
+    if(state.unit===el.dataset.unit) return;
+    state.unit = el.dataset.unit;
+    saveData(); render();
+  });
+
   const heightInput = document.getElementById('onboarding-height');
-  if(heightInput) heightInput.oninput=()=>{ state.nutritionProfile.heightCm = heightInput.value; };
+  if(heightInput) heightInput.oninput=()=>{ state.nutritionProfile.heightCm = fromDisplayHeight(heightInput.value); };
   const ageInput = document.getElementById('onboarding-age');
   if(ageInput) ageInput.oninput=()=>{ state.nutritionProfile.age = ageInput.value; };
   const weightInput = document.getElementById('onboarding-weight');
   if(weightInput) weightInput.oninput=()=>{ state._onboardingWeight = weightInput.value; };
+  const stepsInput = document.getElementById('onboarding-steps');
+  if(stepsInput) stepsInput.oninput=()=>{ state.activityQ.stepsPerDay = stepsInput.value; };
+  const sportsInput = document.getElementById('onboarding-sports');
+  if(sportsInput) sportsInput.oninput=()=>{ state.activityQ.otherSportsHours = sportsInput.value; };
   document.querySelectorAll('[data-onboarding-sex]').forEach(el=>el.onclick=()=>{ state.nutritionProfile.sex=el.dataset.onboardingSex; render(); });
   document.querySelectorAll('[data-onboarding-goal]').forEach(el=>el.onclick=()=>{ state.nutritionProfile.goal=el.dataset.onboardingGoal; render(); });
+  document.querySelectorAll('[data-onboarding-rate]').forEach(el=>el.onclick=()=>{ state.nutritionProfile.weeklyRateKg=Number(el.dataset.onboardingRate); render(); });
 
   const step2Done = document.getElementById('onboarding-step2-done');
   if(step2Done) step2Done.onclick=()=>{
@@ -3203,7 +3277,7 @@ function nutritionSetupTab(){
     <div class="card">
       <p class="card-title">Your profile</p>
       <div class="row wrap" style="gap:10px;">
-        <div style="flex:1;min-width:100px;"><label class="tiny muted">Height (cm)</label><input type="text" inputmode="numeric" value="${p.heightCm}" data-nutrition-profile="heightCm" id="nutrition-height-input"></div>
+        <div style="flex:1;min-width:100px;"><label class="tiny muted">Height (${heightUnitLabel()})</label><input type="text" inputmode="decimal" value="${toDisplayHeight(p.heightCm)}" id="nutrition-height-input"></div>
         <div style="flex:1;min-width:80px;"><label class="tiny muted">Age</label><input type="text" inputmode="numeric" value="${p.age}" data-nutrition-profile="age" id="nutrition-age-input"></div>
       </div>
       <div class="row wrap" style="gap:8px;margin-top:10px;">
@@ -3454,7 +3528,7 @@ function exerciseLogView(e, supersetIdx, blockId){
     const filledCount = e.sets.filter(s=>s.filled).length;
     const top = e.weighted ? topSetWeightAndReps(e.sets) : null;
     const summary = (e.weighted && top && top.weight>0)
-      ? `${filledCount} set${filledCount!==1?'s':''} · top ${toDisplayWeight(top.weight)}${unitLabel()}×${top.reps}`
+      ? `${filledCount} set${filledCount!==1?'s':''} · top ${toDisplayWeightForUnit(top.weight, exerciseWeightUnit(e))}${exerciseWeightUnit(e)}×${top.reps}`
       : `${filledCount} set${filledCount!==1?'s':''} logged`;
     return `<div class="card" data-exuid="${e.uid}" data-toggle-exercise-collapse="${e.uid}" style="cursor:pointer;">
       <div class="row between">
@@ -3487,6 +3561,10 @@ function exerciseLogView(e, supersetIdx, blockId){
 
     <div class="row wrap" style="gap:8px;margin-bottom:10px;">
       <button class="chip small" data-toggle-weighted="${e.uid}">${e.weighted?'Weighted ✓':'Bodyweight ✓'} — tap to swap</button>
+      ${e.weighted ? `
+        <button class="chip small ${exerciseWeightUnit(e)==='kg'?'active':''}" data-exercise-weight-unit="${e.uid}" data-weight-unit="kg">kg</button>
+        <button class="chip small ${exerciseWeightUnit(e)==='lb'?'active':''}" data-exercise-weight-unit="${e.uid}" data-weight-unit="lb">lb</button>
+      ` : ''}
       <button class="chip small" data-focus="${e.uid}">▣ Focus Mode</button>
       <button class="chip small" data-make-superset="${blockId}">Make it a Superset</button>
     </div>
@@ -3498,7 +3576,7 @@ function exerciseLogView(e, supersetIdx, blockId){
     <table class="setgrid">
       <thead><tr>
         <th></th>
-        <th>Weight (${unitLabel()})</th>
+        <th>Weight (${exerciseWeightUnit(e)})</th>
         <th>Reps</th>
         <th>RPE</th>
         <th></th>
@@ -3508,7 +3586,7 @@ function exerciseLogView(e, supersetIdx, blockId){
           const isPR = e.weighted && st.filled && isNewPRAtSet(e.exerciseId, e.sets, idx);
           return `<tr>
             <td class="set-num">${idx+1}</td>
-            ${e.weighted?`<td><input type="number" inputmode="decimal" placeholder="0" value="${toDisplayWeight(st.weight)}" data-set-field="weight" data-exuid="${e.uid}" data-idx="${idx}"></td>`:`<td style="text-align:center;font-size:15px;padding:9px 6px;">BW</td>`}
+            ${e.weighted?`<td><input type="number" inputmode="decimal" placeholder="0" value="${toDisplayWeightForUnit(st.weight, exerciseWeightUnit(e))}" data-set-field="weight" data-exuid="${e.uid}" data-idx="${idx}"></td>`:`<td style="text-align:center;font-size:15px;padding:9px 6px;">BW</td>`}
             <td><input type="number" inputmode="numeric" placeholder="0" value="${st.reps}" data-set-field="reps" data-exuid="${e.uid}" data-idx="${idx}"></td>
             <td><input type="number" inputmode="numeric" min="1" max="10" placeholder="—" value="${st.rpe}" data-set-field="rpe" data-exuid="${e.uid}" data-idx="${idx}" style="width:52px;"></td>
             <td>${isPR?'<span class="pr-badge">★ PR</span>':''}</td>
@@ -3848,7 +3926,7 @@ function pastExerciseReadView(e, s){
     <table class="setgrid" style="margin-top:2px;">
       <thead><tr>
         <th></th>
-        <th>Weight (${unitLabel()})</th>
+        <th>Weight (${exerciseWeightUnit(e)})</th>
         <th>Reps</th><th>RPE</th><th>Notes</th><th></th>
       </tr></thead>
       <tbody>
@@ -3856,7 +3934,7 @@ function pastExerciseReadView(e, s){
           const wasPR = e.weighted && isNewPRAtSet(e.exerciseId, validSets, idx, s.date);
           return `<tr>
             <td class="set-num">${idx+1}</td>
-            ${e.weighted?`<td class="mono small" style="text-align:center;">${toDisplayWeight(st.weight)}</td>`:`<td class="mono small" style="text-align:center;">BW</td>`}
+            ${e.weighted?`<td class="mono small" style="text-align:center;">${toDisplayWeightForUnit(st.weight, exerciseWeightUnit(e))}</td>`:`<td class="mono small" style="text-align:center;">BW</td>`}
             <td class="mono small" style="text-align:center;">${st.reps}</td>
             <td class="mono small" style="text-align:center;">${st.rpe||'—'}</td>
             <td class="mono small muted" style="text-align:center;">${st.notes||''}</td>
@@ -3878,15 +3956,19 @@ function pastExerciseEditView(e, s, blockId){
     </div>
     <div class="row wrap" style="gap:8px;margin-bottom:8px;">
       <button class="chip small" data-toggle-weighted="${e.uid}">${e.weighted?'Weighted ✓':'Bodyweight ✓'} — tap to swap</button>
+      ${e.weighted ? `
+        <button class="chip small ${exerciseWeightUnit(e)==='kg'?'active':''}" data-exercise-weight-unit="${e.uid}" data-weight-unit="kg">kg</button>
+        <button class="chip small ${exerciseWeightUnit(e)==='lb'?'active':''}" data-exercise-weight-unit="${e.uid}" data-weight-unit="lb">lb</button>
+      ` : ''}
       <button class="chip small" data-make-superset-past="${blockId}" data-superset-session-id="${s.id}">Make it a Superset</button>
     </div>
     <table class="setgrid">
-      <thead><tr><th></th><th>Weight (${unitLabel()})</th><th>Reps</th><th>RPE</th><th></th></tr></thead>
+      <thead><tr><th></th><th>Weight (${exerciseWeightUnit(e)})</th><th>Reps</th><th>RPE</th><th></th></tr></thead>
       <tbody>
         ${e.sets.map((st,idx)=>`
           <tr>
             <td class="set-num">${idx+1}</td>
-            ${e.weighted?`<td><input type="number" inputmode="decimal" placeholder="0" value="${toDisplayWeight(st.weight)}" data-set-field="weight" data-exuid="${e.uid}" data-idx="${idx}"></td>`:`<td style="text-align:center;font-size:15px;padding:9px 6px;">BW</td>`}
+            ${e.weighted?`<td><input type="number" inputmode="decimal" placeholder="0" value="${toDisplayWeightForUnit(st.weight, exerciseWeightUnit(e))}" data-set-field="weight" data-exuid="${e.uid}" data-idx="${idx}"></td>`:`<td style="text-align:center;font-size:15px;padding:9px 6px;">BW</td>`}
             <td><input type="number" inputmode="numeric" placeholder="0" value="${st.reps}" data-set-field="reps" data-exuid="${e.uid}" data-idx="${idx}"></td>
             <td><input type="number" inputmode="numeric" min="1" max="10" placeholder="—" value="${st.rpe}" data-set-field="rpe" data-exuid="${e.uid}" data-idx="${idx}" style="width:52px;"></td>
             <td><button class="btn btn-ghost btn-sm" data-remove-set="${e.uid}" data-idx="${idx}">✕</button></td>
@@ -4633,6 +4715,15 @@ function settingsView(){
     </div>
 
     <div class="card">
+      <p class="card-title">Height unit</p>
+      <p class="small muted" style="margin-top:0;">Applies to your height in Nutrition Setup.</p>
+      <div class="row wrap">
+        <button class="chip ${state.heightUnit==='cm'?'active':''}" data-height-unit="cm">Centimeters (cm)</button>
+        <button class="chip ${state.heightUnit==='in'?'active':''}" data-height-unit="in">Inches (in)</button>
+      </div>
+    </div>
+
+    <div class="card">
       <p class="card-title">Distance unit</p>
       <p class="small muted" style="margin-top:0;">Applies to Run/Bike/Swim logging, gear wear, and the dashboard charts.</p>
       <div class="row wrap">
@@ -4961,6 +5052,11 @@ function attachHandlers(){
     render();
   });
   document.querySelectorAll('[data-toggle-weighted]').forEach(el=>el.onclick=()=>toggleWeighted(el.dataset.toggleWeighted));
+  document.querySelectorAll('[data-exercise-weight-unit]').forEach(el=>el.onclick=()=>{
+    const ctx = findExerciseContext(el.dataset.exerciseWeightUnit); if(!ctx) return;
+    ctx.exercise.weightUnit = el.dataset.weightUnit;
+    saveData(); render();
+  });
   document.querySelectorAll('[data-add-set]').forEach(el=>el.onclick=()=>addSetRow(el.dataset.addSet));
 
   document.querySelectorAll('[data-set-field]').forEach(el=>{
@@ -5048,6 +5144,11 @@ function attachHandlers(){
   document.querySelectorAll('[data-unit]').forEach(el=>el.onclick=()=>{
     if(state.unit===el.dataset.unit) return;
     state.unit = el.dataset.unit;
+    saveData(); render();
+  });
+  document.querySelectorAll('[data-height-unit]').forEach(el=>el.onclick=()=>{
+    if(state.heightUnit===el.dataset.heightUnit) return;
+    state.heightUnit = el.dataset.heightUnit;
     saveData(); render();
   });
   document.querySelectorAll('[data-distance-unit]').forEach(el=>el.onclick=()=>{
@@ -5146,6 +5247,8 @@ function attachHandlers(){
   document.querySelectorAll('[data-nutrition-profile]').forEach(el=>{
     el.oninput=()=>{ state.nutritionProfile[el.dataset.nutritionProfile]=el.value; saveData(); render(); };
   });
+  const nutritionHeightInput = document.getElementById('nutrition-height-input');
+  if(nutritionHeightInput) nutritionHeightInput.oninput=()=>{ state.nutritionProfile.heightCm = fromDisplayHeight(nutritionHeightInput.value); saveData(); render(); };
   document.querySelectorAll('[data-nutrition-sex]').forEach(el=>el.onclick=()=>{ state.nutritionProfile.sex=el.dataset.nutritionSex; saveData(); render(); });
   document.querySelectorAll('[data-nutrition-goal]').forEach(el=>el.onclick=()=>{ state.nutritionProfile.goal=el.dataset.nutritionGoal; saveData(); render(); });
   document.querySelectorAll('[data-nutrition-rate]').forEach(el=>el.onclick=()=>{ state.nutritionProfile.weeklyRateKg=Number(el.dataset.nutritionRate); saveData(); render(); });
