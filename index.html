@@ -404,6 +404,7 @@ let state = {
   _showAllPRs:false,
   _showAllDashboardPRs:false,
   _showAllStationBoard:false,
+  _historyRangeFilter:'all',
   _recipeSearch:'',
   _recipeResults:[],
   _recipeLoading:false,
@@ -438,6 +439,11 @@ let state = {
   foodLogs:[],            // {id, date, name, grams, cal, protein, carbs, fat}
   customFoods:[],         // user-added foods, same shape as FOOD_DATABASE + custom:true
   savedMeals:[],          // {id, name, items:[{foodId, grams}]} — logged all at once
+  remindersEnabled:true,  // opt-out for the daily "did you log your workout" email
+  readinessLogs:[],       // {id, date, level 1-5} — one-tap daily readiness check-in
+  _helpExpandedTopics:{},
+  onboardingDone:false,
+  _onboardingStep:1,
   _mealBuilder:null,      // {name, items:[]} while building a new saved meal
   _showMealBuilder:false,
   _mealFoodSearch:'',
@@ -578,6 +584,9 @@ async function loadUserData(){
       state.foodLogs = d.foodLogs||[];
       state.customFoods = d.customFoods||[];
       state.savedMeals = d.savedMeals||[];
+      state.remindersEnabled = d.remindersEnabled!==false;
+      state.readinessLogs = d.readinessLogs||[];
+      state.onboardingDone = d.onboardingDone===true;
     }
   }catch(e){ console.error('load failed', e); if(window.Sentry) Sentry.captureException(e); }
   render();
@@ -590,7 +599,7 @@ function buildSavePayload(){
     customHyroxStations:state.customHyroxStations,
     distanceUnit:state.distanceUnit, gear:state.gear, gearNotified80:state.gearNotified80,
     nutritionProfile:state.nutritionProfile, activityQ:state.activityQ, weightLogs:state.weightLogs,
-    foodLogs:state.foodLogs, customFoods:state.customFoods, savedMeals:state.savedMeals
+    foodLogs:state.foodLogs, customFoods:state.customFoods, savedMeals:state.savedMeals, remindersEnabled:state.remindersEnabled, readinessLogs:state.readinessLogs, onboardingDone:state.onboardingDone
   };
 }
 async function attemptSave(retriesLeft){
@@ -780,6 +789,55 @@ function topSetWeightAndReps(sets){
     if(w>=top.weight) top = {weight:w, reps:Number(s.reps)||0};
   });
   return top;
+}
+/* ---- Daily readiness check-in — a single tap on energy/readiness to train, not a mood
+   diary. Kept to one tap on purpose (a full sleep/soreness/mood form is real friction that
+   hurts daily engagement); the labels exist specifically so the data still means something
+   concrete months later, not just an unlabeled number. ---- */
+const READINESS_LEVELS = [
+  {value:1, emoji:'😞', label:'Wiped'},
+  {value:2, emoji:'🙁', label:'Low'},
+  {value:3, emoji:'😐', label:'Okay'},
+  {value:4, emoji:'🙂', label:'Good'},
+  {value:5, emoji:'💪', label:'Great'},
+];
+function readinessLevelInfo(value){
+  return READINESS_LEVELS.find(l=>l.value===Math.round(value)) || READINESS_LEVELS[2];
+}
+function todaysReadiness(){
+  return state.readinessLogs.find(r=>dateKey(r.date)===todayKey());
+}
+function logReadiness(level){
+  const today = todaysReadiness();
+  if(today){ today.level = level; today.date = todayISO(); }
+  else state.readinessLogs.push({id:uid(), date:todayISO(), level});
+  saveData(); render();
+}
+function averageReadiness(logs){
+  if(!logs || !logs.length) return null;
+  return logs.reduce((s,r)=>s+r.level,0)/logs.length;
+}
+// The specific pattern worth surfacing: an exercise plateaued (per the existing 3-session
+// check) AND readiness was notably lower than usual on those exact session days — the
+// "your bench has stalled and you've felt low on those days" insight.
+function plateauReadinessInsights(){
+  const insights = [];
+  const overallAvg = averageReadiness(state.readinessLogs);
+  if(overallAvg===null) return insights; // no readiness data logged at all yet — nothing to correlate
+  const allExIds = new Set();
+  pastGymSessions().forEach(s=>(s.blocks||[]).forEach(b=>(b.exercises||[]).forEach(e=>{ if(e.weighted) allExIds.add(e.exerciseId); })));
+  allExIds.forEach(exId=>{
+    if(!isPlateaued(exId)) return;
+    const last3 = historyForExercise(exId).slice(-3);
+    const levels = last3.map(h=>{ const r=state.readinessLogs.find(r=>dateKey(r.date)===dateKey(h.date)); return r?r.level:null; }).filter(l=>l!==null);
+    if(levels.length<2) return; // not enough readiness data logged on those specific days to say anything meaningful
+    const avgDuringPlateau = levels.reduce((a,b)=>a+b,0)/levels.length;
+    if(avgDuringPlateau <= overallAvg-0.75){
+      const ex = exerciseById(exId);
+      insights.push({exerciseName: ex?ex.name:'Exercise', avgDuringPlateau, overallAvg, daysWithData:levels.length});
+    }
+  });
+  return insights;
 }
 function isPlateaued(exId){
   const hist = historyForExercise(exId);
@@ -1751,24 +1809,12 @@ function exportGym(){ downloadCSV(exportGymCSV(), 'hybrid-athlete-gym-export'); 
 function exportCardio(){ downloadCSV(exportCardioCSV(), 'hybrid-athlete-cardio-export'); }
 
 /* ============================= PLATE CALC ============================= */
-function calcPlates(total, bar){
-  total=Number(total)||0; bar=Number(bar)||0;
-  let perSide = (total-bar)/2;
-  if(perSide<0) perSide=0;
-  const plateSizes = state.unit==='lb' ? [45,35,25,10,5,2.5] : [25,20,15,10,5,2.5,1.25];
-  const result=[];
-  plateSizes.forEach(p=>{
-    const count = Math.floor(perSide/p + 1e-6);
-    if(count>0){ result.push({plate:p, count}); perSide -= count*p; }
-  });
-  return result;
-}
-
 /* ============================= RENDER ============================= */
 function render(){
   document.body.className = state.theme==='light' ? 'theme-light' : '';
   const app=document.getElementById('app');
   if(!state._authUser){ app.innerHTML = authScreen(); attachAuthHandlers(); return; }
+  if(!state.onboardingDone){ app.innerHTML = onboardingScreen(); attachOnboardingHandlers(); return; }
   // Preserve focus + cursor/selection across the full re-render below, since innerHTML
   // destroys and recreates every element (this matters for anything that re-renders
   // on every keystroke, like the food search box or a range slider mid-drag).
@@ -1809,6 +1855,89 @@ function saveFailedBanner(){
   </div>`;
 }
 
+function onboardingScreen(){
+  const step = state._onboardingStep || 1;
+  return `
+    <div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;">
+      <div class="logo" style="margin-bottom:20px;font-size:22px;"><span class="dot"></span>HYBRID ATHLETE</div>
+      <div class="card" style="width:100%;max-width:420px;">
+        <p class="tiny muted" style="margin:0 0 14px 0;">Step ${step} of 2</p>
+        ${step===1 ? onboardingStep1() : onboardingStep2()}
+      </div>
+    </div>
+  `;
+}
+function onboardingStep1(){
+  return `
+    <p class="card-title">Add this to your home screen</p>
+    <p class="small muted" style="margin-top:0;">Turns Hybrid Athlete into a real app icon that opens full-screen — no browser bar, feels just like any other app on your phone. <strong style="color:var(--accent);">Takes 10 seconds.</strong></p>
+    <div style="margin-top:14px;">
+      <div class="tiny" style="text-transform:uppercase;letter-spacing:1px;color:var(--accent);font-weight:700;margin-bottom:4px;">On iPhone (Safari)</div>
+      <div class="small muted">Tap the Share icon <span class="mono">⬆</span> → "Add to Home Screen" → Add.</div>
+    </div>
+    <div style="margin-top:12px;">
+      <div class="tiny" style="text-transform:uppercase;letter-spacing:1px;color:var(--accent);font-weight:700;margin-bottom:4px;">On Android (Chrome)</div>
+      <div class="small muted">Tap the ⋮ menu → "Add to Home screen" or "Install app" → Add.</div>
+    </div>
+    <button class="btn btn-accent btn-block" id="onboarding-step1-done" style="margin-top:18px;padding:14px;">I've added it — Continue</button>
+    <button class="btn btn-ghost btn-block" id="onboarding-step1-skip" style="margin-top:8px;">Skip for now</button>
+  `;
+}
+function onboardingStep2(){
+  const p = state.nutritionProfile;
+  return `
+    <p class="card-title">Set up your nutrition (optional)</p>
+    <p class="small muted" style="margin-top:0;">A minute now unlocks your calorie and macro targets from day one. Skip if you'd rather do this later — it's always in Nutrition → Setup.</p>
+    <div class="row wrap" style="gap:8px;margin-top:12px;">
+      <div style="flex:1;min-width:90px;"><label class="tiny muted">Height (cm)</label><input type="text" inputmode="numeric" value="${p.heightCm}" id="onboarding-height"></div>
+      <div style="flex:1;min-width:70px;"><label class="tiny muted">Age</label><input type="text" inputmode="numeric" value="${p.age}" id="onboarding-age"></div>
+      <div style="flex:1;min-width:90px;"><label class="tiny muted">Weight (${unitLabel()})</label><input type="text" inputmode="decimal" id="onboarding-weight"></div>
+    </div>
+    <label class="tiny muted" style="display:block;margin-top:10px;">Sex (for the calorie formula)</label>
+    <div class="row wrap" style="gap:8px;margin-top:4px;">
+      <button class="chip small ${p.sex==='male'?'active':''}" data-onboarding-sex="male">Male</button>
+      <button class="chip small ${p.sex==='female'?'active':''}" data-onboarding-sex="female">Female</button>
+    </div>
+    <label class="tiny muted" style="display:block;margin-top:10px;">Goal</label>
+    <div class="row wrap" style="gap:8px;margin-top:4px;">
+      <button class="chip small ${p.goal==='cut'?'active':''}" data-onboarding-goal="cut">Cutting</button>
+      <button class="chip small ${p.goal==='maintain'?'active':''}" data-onboarding-goal="maintain">Maintaining</button>
+      <button class="chip small ${p.goal==='bulk'?'active':''}" data-onboarding-goal="bulk">Bulking</button>
+    </div>
+    <button class="btn btn-accent btn-block" id="onboarding-step2-done" style="margin-top:18px;padding:14px;">Save & Finish</button>
+    <button class="btn btn-ghost btn-block" id="onboarding-step2-skip" style="margin-top:8px;">Skip for now</button>
+  `;
+}
+function finishOnboarding(){
+  state.onboardingDone = true;
+  saveData();
+  render();
+}
+function attachOnboardingHandlers(){
+  const step1Done = document.getElementById('onboarding-step1-done');
+  if(step1Done) step1Done.onclick=()=>{ state._onboardingStep=2; render(); };
+  const step1Skip = document.getElementById('onboarding-step1-skip');
+  if(step1Skip) step1Skip.onclick=()=>{ state._onboardingStep=2; render(); };
+
+  const heightInput = document.getElementById('onboarding-height');
+  if(heightInput) heightInput.oninput=()=>{ state.nutritionProfile.heightCm = heightInput.value; };
+  const ageInput = document.getElementById('onboarding-age');
+  if(ageInput) ageInput.oninput=()=>{ state.nutritionProfile.age = ageInput.value; };
+  const weightInput = document.getElementById('onboarding-weight');
+  if(weightInput) weightInput.oninput=()=>{ state._onboardingWeight = weightInput.value; };
+  document.querySelectorAll('[data-onboarding-sex]').forEach(el=>el.onclick=()=>{ state.nutritionProfile.sex=el.dataset.onboardingSex; render(); });
+  document.querySelectorAll('[data-onboarding-goal]').forEach(el=>el.onclick=()=>{ state.nutritionProfile.goal=el.dataset.onboardingGoal; render(); });
+
+  const step2Done = document.getElementById('onboarding-step2-done');
+  if(step2Done) step2Done.onclick=()=>{
+    if(state._onboardingWeight){
+      logWeight(state._onboardingWeight);
+    }
+    finishOnboarding();
+  };
+  const step2Skip = document.getElementById('onboarding-step2-skip');
+  if(step2Skip) step2Skip.onclick=finishOnboarding;
+}
 function authScreen(){
   const mode = state._authMode;
   return `
@@ -2008,8 +2137,22 @@ function todayView(){
   return cardioTypeScreen(state._logChoice);
 }
 
+function readinessCheckInCard(){
+  const today = todaysReadiness();
+  return `<div class="card">
+    <p class="card-title">How ready are you to train today?</p>
+    <p class="tiny muted" style="margin:0 0 10px 0;">A quick daily check-in on your energy and readiness to train — not your mood in general. One tap, skippable, and it helps spot patterns like a plateau lining up with a run of low-energy days.</p>
+    <div class="row wrap" style="gap:8px;">
+      ${READINESS_LEVELS.map(l=>`<button class="chip ${today&&today.level===l.value?'active':''}" data-log-readiness="${l.value}" style="flex:1;min-width:60px;text-align:center;padding:10px 4px;">
+        <div style="font-size:20px;">${l.emoji}</div>
+        <div class="tiny" style="margin-top:2px;">${l.label}</div>
+      </button>`).join('')}
+    </div>
+  </div>`;
+}
 function logChoiceScreen(){
   return `
+    ${readinessCheckInCard()}
     <div class="card">
       <p class="card-title">What do you want to log?</p>
       <h2 class="display" style="font-size:26px;margin:0 0 4px 0;">${new Date().toLocaleDateString(undefined,{weekday:'long', month:'long', day:'numeric'})}</h2>
@@ -3445,16 +3588,32 @@ function focusOverlay(){
 }
 
 /* ---------- HISTORY VIEW ---------- */
+function getHistoryRangeStart(){
+  const now = new Date();
+  const filter = state._historyRangeFilter || 'all';
+  if(filter==='today'){ const d=new Date(now); d.setHours(0,0,0,0); return d; }
+  if(filter==='week'){ const d=new Date(now); d.setDate(now.getDate()-7); return d; }
+  if(filter==='month'){ const d=new Date(now); d.setMonth(now.getMonth()-1); return d; }
+  if(filter==='year'){ const d=new Date(now); d.setFullYear(now.getFullYear()-1); return d; }
+  return null; // 'all'
+}
 function historyView(){
-  const sessions = pastSessions();
-  if(!sessions.length) return `<div class="empty"><div class="display">No workouts yet</div><div class="small">Finish a session and it'll show up here.</div></div>`;
+  const allSessions = pastSessions();
+  if(!allSessions.length) return `<div class="empty"><div class="display">No workouts yet</div><div class="small">Finish a session and it'll show up here.</div></div>`;
+  const rangeStart = getHistoryRangeStart();
+  const sessions = rangeStart ? allSessions.filter(s=>new Date(s.date)>=rangeStart) : allSessions;
   const tab = state._historyTab || 'sessions';
   return `
+    <div class="row wrap" style="gap:8px;margin-bottom:10px;">
+      ${[['all','All Time'],['today','Today'],['week','This Week'],['month','This Month'],['year','This Year']].map(([id,label])=>
+        `<button class="chip small ${(state._historyRangeFilter||'all')===id?'active':''}" data-history-range="${id}">${label}</button>`
+      ).join('')}
+    </div>
     <div class="row" style="gap:8px;margin-bottom:14px;">
       <button class="chip ${tab==='sessions'?'active':''}" data-history-tab="sessions">Sessions</button>
       <button class="chip ${tab==='prs'?'active':''}" data-history-tab="prs">PRs</button>
     </div>
-    ${tab==='prs' ? prTableTab() : sessionsTab(sessions)}
+    ${tab==='prs' ? prTableTab() : (sessions.length ? sessionsTab(sessions) : `<div class="empty"><div class="display">No workouts in this range</div><div class="small">Try a wider date range.</div></div>`)}
   `;
 }
 
@@ -4168,6 +4327,30 @@ function dashboardView(){
       ` : `<p class="tiny muted" style="margin:0;">${fmtDate(start)} – ${fmtDate(end)}</p>`}
     </div>
 
+    ${(()=>{
+      const logs = state.readinessLogs.filter(r=>{ const d=new Date(r.date); return d>=start && d<=end; }).sort((a,b)=>new Date(a.date)-new Date(b.date));
+      const plateauInsights = plateauReadinessInsights();
+      if(!logs.length && !plateauInsights.length) return '';
+      return `<div class="card">
+        <p class="card-title">Readiness</p>
+        ${logs.length ? `<div class="row wrap" style="gap:10px;margin-bottom:${plateauInsights.length?'14px':'0'};">
+          ${logs.map(r=>{
+            const lvl = readinessLevelInfo(r.level);
+            return `<div style="text-align:center;" title="${fmtDate(r.date)}: ${lvl.label}">
+              <div style="font-size:20px;">${lvl.emoji}</div>
+              <div class="tiny muted">${new Date(r.date).getDate()}</div>
+            </div>`;
+          }).join('')}
+        </div>` : `<p class="small muted" style="margin:0 0 ${plateauInsights.length?'14':'0'}px 0;">No check-ins in this range yet.</p>`}
+        ${plateauInsights.map(i=>{
+          const lvl = readinessLevelInfo(i.avgDuringPlateau);
+          return `<div style="padding:10px;background:var(--surface-2);border-radius:10px;margin-bottom:8px;">
+            <p class="small" style="margin:0;">⚠ <strong>${i.exerciseName}</strong> has plateaued over your last 3 sessions with it — and your readiness on those days averaged <strong>${lvl.label}</strong>, lower than your usual. Might be worth prioritizing recovery before chasing a new PR here.</p>
+          </div>`;
+        }).join('')}
+      </div>`;
+    })()}
+
     <div class="card">
       <p class="card-title">Training Mix</p>
       <p class="tiny muted" style="margin:0 0 4px 0;">% of total training time across every discipline this range</p>
@@ -4333,13 +4516,97 @@ function dashboardView(){
   `;
 }
 
+const HELP_TOPICS = [
+  {id:'start', title:'Getting Started', body:`
+    <p>This app tracks training across every discipline a hybrid athlete does — Gym, Run, Bike, Swim, and Hyrox — plus nutrition, weight, and how you're feeling, all in one place.</p>
+    <p><strong>Suggested first steps:</strong></p>
+    <ol style="margin:6px 0 0 18px;padding:0;">
+      <li>Set up your nutrition targets — <strong>Nutrition tab → Setup</strong> (details below)</li>
+      <li>Log your first workout from the <strong>Today</strong> tab</li>
+      <li>Check <strong>Dashboard</strong> after a few sessions to see your training data start to build</li>
+    </ol>
+  `},
+  {id:'gym', title:'Gym', body:`
+    <p><strong>Today tab → Gym.</strong> Pick your muscle groups, select exercises (multi-select — pick several at once, then add them all together), and start logging sets.</p>
+    <ul style="margin:6px 0 0 18px;padding:0;">
+      <li>Each exercise shows what you did <strong>last time</strong>, prefilled, so you can just adjust and go.</li>
+      <li><strong>★ PR</strong> badges appear automatically the moment a set beats your previous best at that rep count.</li>
+      <li><strong>Make it a Superset</strong> groups exercises together, including editing a past workout in History.</li>
+      <li>An exercise auto-collapses once all its sets are filled in — tap ▲/▼ anytime to expand or collapse manually.</li>
+      <li>A <strong>"⚠ NO PROGRESS"</strong> tag appears if an exercise's top weight hasn't increased in 3 sessions — a plateau flag.</li>
+      <li>Don't see an exercise you need? <strong>Library tab</strong> → add your own.</li>
+    </ul>
+  `},
+  {id:'cardio', title:'Run / Bike / Swim', body:`
+    <p><strong>Today tab → Run, Bike, or Swim.</strong> Pick a workout type (Easy Run, Interval Ride, etc.) — you'll see your <strong>last time doing that exact type</strong>, including pace, for quick comparison.</p>
+    <ul style="margin:6px 0 0 18px;padding:0;">
+      <li>Structured workouts (warmup / intervals / cooldown) are supported for interval-style sessions.</li>
+      <li>Log gear (shoes, bike chain, etc.) in <strong>Settings</strong> — wear tracking warns you as it approaches its distance limit.</li>
+      <li>Gels/nutrition logged during a session count toward your daily calories automatically.</li>
+    </ul>
+  `},
+  {id:'hyrox', title:'Hyrox', body:`
+    <p><strong>Today tab → Hyrox.</strong> Add stations one at a time, or build a repeating <strong>Circuit</strong> (e.g. 600m Run + 600m SkiErg, ×4) as <strong>For Time, EMOM, or AMRAP</strong>.</p>
+    <ul style="margin:6px 0 0 18px;padding:0;">
+      <li>Add <strong>Rest</strong> between stations if needed — it counts toward total time, not toward distance or PRs.</li>
+      <li>Have a single finish-line time instead of per-station splits? Enter it directly as <strong>"overall finish time"</strong> — it overrides the calculated total and feeds your calorie estimate.</li>
+      <li>Running inside a Hyrox session automatically counts toward your Run stats on the Dashboard too.</li>
+    </ul>
+  `},
+  {id:'nutrition', title:'Nutrition & Weight — set up your targets here', body:`
+    <p><strong>This is the one most people miss:</strong> your calorie and macro targets won't show up until you fill in your profile.</p>
+    <p><strong>Nutrition tab → Setup</strong> — enter:</p>
+    <ul style="margin:6px 0 0 18px;padding:0;">
+      <li>Height, age, and sex (used to calculate your maintenance calories)</li>
+      <li>Your goal — Cutting, Maintaining, or Bulking, with a rate</li>
+      <li>Protein target and carb/fat split</li>
+    </ul>
+    <p style="margin-top:8px;"><strong>Nutrition tab → Weight</strong> — log your weight here (needed for the calorie calculation to work, and unlocks your weight trend chart). After 7+ days of both weight and food logged, a <strong>rolling TDEE estimate</strong> appears — a more accurate, personalized number than the formula alone.</p>
+    <p style="margin-top:8px;"><strong>Nutrition tab → Today</strong> — this is where you actually log food day to day, once Setup is done. Search, use a saved meal, or add your own custom food if something's not in the list.</p>
+  `},
+  {id:'recipes', title:'Recipes', body:`
+    <p><strong>Nutrition tab → Recipes.</strong> Search meal ideas with photos, ingredients, and instructions. This is for inspiration, not calorie tracking — recipe measures don't map cleanly to exact macros, so it doesn't log to your food totals automatically.</p>
+  `},
+  {id:'readiness', title:'Readiness Check-in', body:`
+    <p>The 😞🙁😐🙂💪 tap at the top of <strong>Today</strong> is a one-second daily check on your energy and readiness to train — not a mood diary. Totally optional, but logging it regularly lets the Dashboard spot patterns, like a plateau lining up with a run of low-energy days.</p>
+  `},
+  {id:'dashboard', title:'Dashboard & History', body:`
+    <p><strong>Dashboard</strong> — your training data zoomed out: discipline mix, consistency, PRs, weight trend, calorie balance, and Hyrox-specific stats. Pick a date range at the top; everything on the page updates to match.</p>
+    <p style="margin-top:8px;"><strong>History</strong> — every past session, filterable by Today/This Week/This Month/This Year, plus an all-time PR table. Tap any session to expand or edit it.</p>
+  `},
+  {id:'data', title:'Your Data & Privacy', body:`
+    <p><strong>Settings → Your data.</strong> Download everything you've logged as a CSV or a full JSON file anytime. You can also permanently delete just your logged data (keeping your login), or delete your entire account outright.</p>
+  `},
+];
+function helpGuideCard(){
+  const expanded = state._helpExpandedTopics||{};
+  return `<div class="card">
+    <p class="card-title">Help &amp; Guide</p>
+    <p class="small muted" style="margin:0 0 10px 0;">How to use each part of the app, and where to set things up.</p>
+    ${HELP_TOPICS.map(t=>`
+      <div style="border-bottom:1px solid var(--border);">
+        <div class="row between" data-toggle-help-topic="${t.id}" style="cursor:pointer;padding:10px 0;">
+          <span class="small" style="font-weight:600;">${t.title}</span>
+          <span class="tiny muted">${expanded[t.id]?'▲':'▼'}</span>
+        </div>
+        ${expanded[t.id] ? `<div class="small" style="padding:0 0 12px 0;line-height:1.5;">${t.body}</div>` : ''}
+      </div>
+    `).join('')}
+  </div>`;
+}
 function settingsView(){
-  const defaultBar = state.unit==='lb' ? 45 : 20;
   return `
+    ${helpGuideCard()}
     <div class="card">
       <p class="card-title">Account</p>
       <p class="small muted" style="margin:0 0 10px 0;">Logged in as <strong>${state._authUser ? state._authUser.email : ''}</strong></p>
       <button class="btn btn-ghost btn-block" id="logout-btn">Log Out</button>
+    </div>
+
+    <div class="card">
+      <p class="card-title">Reminders</p>
+      <p class="small muted" style="margin:0 0 10px 0;">A once-a-day email nudge, only sent on days you haven't logged a workout by check time. Never more than one a day.</p>
+      <button class="btn ${state.remindersEnabled?'btn-accent':'btn-ghost'} btn-block" id="toggle-reminders-btn">${state.remindersEnabled?'✓ Reminder emails on':'Reminder emails off'}</button>
     </div>
 
     <div class="card">
@@ -4358,7 +4625,7 @@ function settingsView(){
 
     <div class="card">
       <p class="card-title">Weight unit</p>
-      <p class="small muted" style="margin-top:0;">Applies everywhere you log or view weight — set grids, charts, and the plate calculator.</p>
+      <p class="small muted" style="margin-top:0;">Applies everywhere you log or view weight — set grids and charts.</p>
       <div class="row wrap">
         <button class="chip ${state.unit==='kg'?'active':''}" data-unit="kg">Kilograms (kg)</button>
         <button class="chip ${state.unit==='lb'?'active':''}" data-unit="lb">Pounds (lb)</button>
@@ -4381,21 +4648,6 @@ function settingsView(){
         ${INJURY_OPTIONS.map(i=>`<button class="chip ${state.injuries.includes(i.id)?'active':''}" data-injury="${i.id}">${i.label}</button>`).join('')}
       </div>
       <p class="tiny muted" style="margin:10px 0 0 0;padding-top:10px;border-top:1px solid var(--border);">This is a general guide, not medical advice. It doesn't account for severity, stage of recovery, or your individual case. Check with a physical therapist or doctor for anything beyond minor discomfort.</p>
-    </div>
-
-    <div class="card">
-      <p class="card-title">Plate calculator</p>
-      <div class="row" style="gap:10px;">
-        <div style="flex:1;">
-          <label class="tiny muted">Total weight (${unitLabel()})</label>
-          <input type="number" id="plate-total" placeholder="100" inputmode="decimal">
-        </div>
-        <div style="flex:1;">
-          <label class="tiny muted">Bar weight (${unitLabel()})</label>
-          <input type="number" id="plate-bar" placeholder="${defaultBar}" inputmode="decimal" value="${defaultBar}">
-        </div>
-      </div>
-      <div id="plate-result" class="row wrap" style="margin-top:12px;gap:8px;"></div>
     </div>
 
     <div class="card">
@@ -4454,6 +4706,7 @@ function attachHandlers(){
   const retrySaveBtn = document.getElementById('retry-save-btn');
   if(retrySaveBtn) retrySaveBtn.onclick=()=>attemptSave(2);
 
+  document.querySelectorAll('[data-log-readiness]').forEach(el=>el.onclick=()=>logReadiness(Number(el.dataset.logReadiness)));
   document.querySelectorAll('[data-log-choice]').forEach(el=>el.onclick=()=>{
     state._logChoice = el.dataset.logChoice;
     if(state._logChoice==='hyrox') state._hyroxDraft = newHyroxDraft();
@@ -4763,8 +5016,15 @@ function attachHandlers(){
     saveData(); render();
   });
 
+  document.querySelectorAll('[data-toggle-help-topic]').forEach(el=>el.onclick=()=>{
+    const id = el.dataset.toggleHelpTopic;
+    state._helpExpandedTopics[id] = !state._helpExpandedTopics[id];
+    render();
+  });
   const logoutBtn = document.getElementById('logout-btn');
   if(logoutBtn) logoutBtn.onclick=logOut;
+  const toggleRemindersBtn = document.getElementById('toggle-reminders-btn');
+  if(toggleRemindersBtn) toggleRemindersBtn.onclick=()=>{ state.remindersEnabled=!state.remindersEnabled; saveData(); render(); };
   const exportDataBtn = document.getElementById('export-data-btn');
   if(exportDataBtn) exportDataBtn.onclick=exportAllDataJSON;
   const deleteDataBtn = document.getElementById('delete-data-btn');
@@ -4795,15 +5055,6 @@ function attachHandlers(){
     state.distanceUnit = el.dataset.distanceUnit;
     saveData(); render();
   });
-
-  const plateTotal = document.getElementById('plate-total');
-  const plateBar = document.getElementById('plate-bar');
-  function updatePlates(){
-    const res = calcPlates(plateTotal.value, plateBar.value);
-    const out = document.getElementById('plate-result');
-    out.innerHTML = res.length? res.map(r=>`<span class="chip small">${r.plate}${unitLabel()} × ${r.count}</span>`).join('') : '<span class="small muted">Enter a total weight</span>';
-  }
-  if(plateTotal){ plateTotal.oninput=updatePlates; plateBar.oninput=updatePlates; updatePlates(); }
 
   const exportGymBtn = document.getElementById('export-gym-btn');
   if(exportGymBtn) exportGymBtn.onclick=exportGym;
@@ -5020,6 +5271,7 @@ function attachHandlers(){
   };
 
   document.querySelectorAll('[data-history-tab]').forEach(el=>el.onclick=()=>{ state._historyTab=el.dataset.historyTab; render(); });
+  document.querySelectorAll('[data-history-range]').forEach(el=>el.onclick=()=>{ state._historyRangeFilter=el.dataset.historyRange; render(); });
 
   document.querySelectorAll('[data-dashboard-range]').forEach(el=>el.onclick=()=>{ state._dashboardRange=el.dataset.dashboardRange; render(); });
   const dashStart = document.getElementById('dashboard-start');
