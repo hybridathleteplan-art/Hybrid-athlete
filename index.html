@@ -419,7 +419,7 @@ let state = {
   distanceUnit:'km',    // 'km' or 'mi' — all distances stored internally in km
   focusMode:false,
   focusTarget:null,      // {exUid}
-  timer:{running:false,seconds:0,total:0,exUid:null},
+  timer:{running:false,paused:false,seconds:0,total:0,exUid:null,exName:'',endTime:null,pausedRemaining:null},
   builderMuscles:[],
   customExercises:[],   // user-added exercises: {id,name,muscle,weighted,tags:[],custom:true}
   customHyroxStations:[], // user-added Hyrox station names
@@ -909,34 +909,83 @@ function playChime(){
 }
 
 /* ============================= TIMER ============================= */
+// Uses an absolute end-timestamp instead of counting ticks — a plain tick-counter drifts
+// or freezes when the screen locks, since browsers throttle/pause setInterval callbacks in
+// the background to save battery. Calculating remaining time from Date.now() vs. a fixed
+// end-time self-corrects the instant the tab is active again, no matter how many ticks
+// actually fired while backgrounded.
 let timerInterval=null;
+function checkTimer(){
+  if(!state.timer.running || state.timer.paused) return;
+  const remaining = Math.max(0, Math.round((state.timer.endTime - Date.now())/1000));
+  state.timer.seconds = remaining;
+  if(remaining<=0){
+    clearInterval(timerInterval);
+    state.timer.running=false;
+    state.timer.seconds=0;
+    playChime();
+    notifyTimerDone();
+    showToast('Rest complete — next set');
+    render();
+    return;
+  }
+  updateTimerDisplay();
+}
 function tickTimer(){
-  timerInterval = setInterval(()=>{
-    if(!state.timer.paused) state.timer.seconds--;
-    if(state.timer.seconds<=0){
-      clearInterval(timerInterval);
-      state.timer.running=false;
-      state.timer.seconds=0;
-      playChime();
-      showToast('Rest complete — next set');
-      render();
-      return;
-    }
-    updateTimerDisplay();
-  },1000);
+  timerInterval = setInterval(checkTimer, 250);
 }
 function startTimer(seconds, exUid){
   unlockAudio();
+  requestNotificationPermission();
   clearInterval(timerInterval);
   const exName = (()=>{ const ex=exerciseById(exerciseIdForUid(exUid)); return ex?ex.name:''; })();
-  state.timer = {running:true, paused:false, seconds, total:seconds, exUid, exName};
+  state.timer = {running:true, paused:false, seconds, total:seconds, exUid, exName, endTime:Date.now()+seconds*1000, pausedRemaining:null};
   render();
   tickTimer();
 }
-function pauseTimer(){ state.timer.paused=true; render(); }
-function resumeTimer(){ state.timer.paused=false; render(); }
+function pauseTimer(){
+  state.timer.paused=true;
+  state.timer.pausedRemaining = Math.max(0, Math.round((state.timer.endTime-Date.now())/1000));
+  render();
+}
+function resumeTimer(){
+  state.timer.paused=false;
+  state.timer.endTime = Date.now() + (state.timer.pausedRemaining||0)*1000;
+  render();
+}
 function cancelTimer(){ clearInterval(timerInterval); state.timer={running:false,paused:false,seconds:0,total:0,exUid:null,exName:''}; render(); }
-function adjustTimer(delta){ state.timer.seconds=Math.max(0,state.timer.seconds+delta); state.timer.total=Math.max(state.timer.total,state.timer.seconds); updateTimerDisplay(); }
+function adjustTimer(delta){
+  if(state.timer.paused){
+    state.timer.pausedRemaining = Math.max(0, (state.timer.pausedRemaining||0)+delta);
+    state.timer.seconds = state.timer.pausedRemaining;
+  }else{
+    state.timer.endTime += delta*1000;
+    state.timer.seconds = Math.max(0, Math.round((state.timer.endTime-Date.now())/1000));
+  }
+  state.timer.total = Math.max(state.timer.total, state.timer.seconds);
+  updateTimerDisplay();
+}
+// Best-effort system notification alongside the chime — the chime can be missed or
+// suspended by the browser when the screen was locked; a real notification is more likely
+// to actually get noticed in that case. Silently does nothing if never granted permission.
+function requestNotificationPermission(){
+  if(typeof Notification!=='undefined' && Notification.permission==='default'){
+    try{ Notification.requestPermission(); }catch(e){}
+  }
+}
+function notifyTimerDone(){
+  if(typeof Notification!=='undefined' && Notification.permission==='granted'){
+    try{ new Notification('Rest complete', {body: state.timer.exName ? `Time for your next set — ${state.timer.exName}` : 'Time for your next set'}); }catch(e){}
+  }
+}
+// The instant the screen unlocks / tab regains focus, immediately reconcile the timer
+// against real elapsed time — catches a completion that happened while backgrounded,
+// instead of leaving the display stuck until the next lucky tick.
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState==='visible' && state.timer && state.timer.running && !state.timer.paused){
+    checkTimer();
+  }
+});
 function exerciseIdForUid(exUid){
   let found=null;
   state.sessions.forEach(s=>{ if(Array.isArray(s.blocks)) s.blocks.forEach(b=>b.exercises.forEach(e=>{ if(e.uid===exUid) found=e.exerciseId; })); });
@@ -2277,8 +2326,10 @@ function startScreen(){
       </div>
     </div>
     ${muscleRepeatGroups.length ? muscleRepeatCard(muscleRepeatGroups) : ''}
+    ${state._multiSelectExercises.length ? `<div style="position:sticky;top:57px;z-index:15;background:var(--bg);padding:8px 0;">
+      <button class="btn btn-accent btn-block" id="add-multiselect-btn" style="padding:14px;">Add ${state._multiSelectExercises.length} Selected Exercise${state._multiSelectExercises.length!==1?'s':''}</button>
+    </div>` : ''}
     ${state.builderMuscles.map(m=>exercisePickerCard(m)).join('')}
-    ${state._multiSelectExercises.length ? `<button class="btn btn-accent btn-block" id="add-multiselect-btn" style="padding:14px;margin-bottom:10px;">Add ${state._multiSelectExercises.length} Selected Exercise${state._multiSelectExercises.length!==1?'s':''}</button>` : ''}
     <button class="btn btn-accent btn-block" id="start-session-btn" style="padding:16px;font-size:16px;">Start Workout</button>
   `;
 }
