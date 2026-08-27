@@ -161,6 +161,9 @@
 /* ============================= SUPABASE ============================= */
 const SUPABASE_URL = 'https://pqngulicssssnhzbjuhh.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBxbmd1bGljc3Nzc25oemJqdWhoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODczNTM1NjYsImV4cCI6MjEwMjkyOTU2Nn0.geqKT4wz2c-Raw6KwfObaVCaBaNgUC3_JN__jDt1f1s';
+// Raw uncompressed EC point (P-256) for the VAPID keypair — used to subscribe this browser
+// to push. The matching private key lives only server-side, as a Supabase secret, never here.
+const VAPID_PUBLIC_KEY = 'BFaAiR4Q5E7NIv5QNEhBNqLvbTJw4GzfEpZCQ0nbEg27XuPOP_1E5HZzgDDfBrWFRsTY6LEUksY0kLc9LQ6G32I';
 // `supabase` (lowercase) is the global namespace injected by the CDN script; `sb` is our
 // actual client instance — kept distinctly named so nothing in this file's own code
 // (which never used that name before) can collide with it.
@@ -442,6 +445,12 @@ let state = {
   savedMeals:[],          // {id, name, items:[{foodId, grams}]} — logged all at once
   remindersEnabled:true,  // opt-out for the daily "did you log your workout" email
   readinessLogs:[],       // {id, date, level 1-5} — one-tap daily readiness check-in
+  otherSportLogs:[],      // {id, date, sport, durationMin, avgHR, extraSteps} — anything outside Gym/Run/Bike/Swim/Hyrox
+  _otherSportPick:'',
+  _otherSportDuration:'',
+  _otherSportHR:'',
+  _otherSportSteps:'',
+  _pushEnabled:false,
   _helpExpandedTopics:{},
   onboardingDone:false,
   _onboardingStep:1,
@@ -518,7 +527,6 @@ function fromDisplayWeightForUnit(val, unit){
 const CM_PER_IN = 2.54;
 function cmToIn(cm){ return cm/CM_PER_IN; }
 function inToCm(inches){ return inches*CM_PER_IN; }
-function heightUnitLabel(){ return state.heightUnit==='in' ? 'in' : 'cm'; }
 function toDisplayHeight(cm){
   if(cm==='' || cm==null) return '';
   const n = Number(cm); if(isNaN(n)) return '';
@@ -529,6 +537,20 @@ function fromDisplayHeight(val){
   if(val==='' || val==null) return '';
   const n = Number(val); if(isNaN(n)) return '';
   return state.heightUnit==='in' ? inToCm(n) : n;
+}
+// Imperial height is conventionally feet+inches ("5'10""), not a flat inches number — a
+// single inches field invites exactly the bug this fixes: someone typing "6" meaning 6 feet
+// produces a nonsensical ~15cm. These convert cleanly between the two representations.
+function heightCmToFeetIn(cm){
+  if(cm==='' || cm==null || isNaN(Number(cm))) return {feet:'', inches:''};
+  const totalIn = cmToIn(Number(cm));
+  const feet = Math.floor(totalIn/12);
+  const inches = Math.round((totalIn - feet*12)*10)/10;
+  return {feet, inches};
+}
+function feetInToCm(feet, inches){
+  const totalIn = (Number(feet)||0)*12 + (Number(inches)||0);
+  return inToCm(totalIn);
 }
 
 const KM_PER_MI = 1.609344;
@@ -619,6 +641,7 @@ async function loadUserData(){
       state.savedMeals = d.savedMeals||[];
       state.remindersEnabled = d.remindersEnabled!==false;
       state.readinessLogs = d.readinessLogs||[];
+      state.otherSportLogs = d.otherSportLogs||[];
       state.onboardingDone = d.onboardingDone===true;
     }
   }catch(e){ console.error('load failed', e); if(window.Sentry) Sentry.captureException(e); }
@@ -632,7 +655,7 @@ function buildSavePayload(){
     customHyroxStations:state.customHyroxStations,
     distanceUnit:state.distanceUnit, gear:state.gear, gearNotified80:state.gearNotified80,
     nutritionProfile:state.nutritionProfile, activityQ:state.activityQ, weightLogs:state.weightLogs,
-    foodLogs:state.foodLogs, customFoods:state.customFoods, savedMeals:state.savedMeals, remindersEnabled:state.remindersEnabled, readinessLogs:state.readinessLogs, onboardingDone:state.onboardingDone
+    foodLogs:state.foodLogs, customFoods:state.customFoods, savedMeals:state.savedMeals, remindersEnabled:state.remindersEnabled, readinessLogs:state.readinessLogs, onboardingDone:state.onboardingDone, otherSportLogs:state.otherSportLogs
   };
 }
 async function attemptSave(retriesLeft){
@@ -942,6 +965,10 @@ function startTimer(seconds, exUid){
   state.timer = {running:true, paused:false, seconds, total:seconds, exUid, exName, endTime:Date.now()+seconds*1000, pausedRemaining:null};
   render();
   tickTimer();
+  // Also tells the server when to push — this is the piece that survives the app being
+  // fully closed, not just backgrounded, since the server decides when to fire, not the
+  // client's own (unreliable-once-closed) timer.
+  scheduleServerNotification(seconds, 'Rest complete', exName ? `Time for your next set — ${exName}` : 'Time for your next set');
 }
 function pauseTimer(){
   state.timer.paused=true;
@@ -972,6 +999,67 @@ function requestNotificationPermission(){
   if(typeof Notification!=='undefined' && Notification.permission==='default'){
     try{ Notification.requestPermission(); }catch(e){}
   }
+}
+// Registering the service worker file itself is safe to do unconditionally on load — it's
+// only the actual push SUBSCRIPTION (asking permission) that should wait for the user to
+// tap something, per standard practice, so an unexpected permission prompt doesn't turn
+// people away.
+function registerServiceWorker(){
+  if('serviceWorker' in navigator){
+    navigator.serviceWorker.register('/sw.js').catch(e=>console.error('SW registration failed', e));
+  }
+}
+function urlBase64ToUint8Array(base64String){
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g,'+').replace(/_/g,'/');
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for(let i=0;i<rawData.length;i++) outputArray[i] = rawData.charCodeAt(i);
+  return outputArray;
+}
+// Called from a Settings button tap — never on page load, so people aren't hit with an
+// unexpected permission prompt the moment they open the app.
+async function enablePushNotifications(){
+  if(!('serviceWorker' in navigator) || !('PushManager' in window)){
+    showToast('Push notifications aren\'t supported on this browser'); return;
+  }
+  try{
+    const permission = await Notification.requestPermission();
+    if(permission!=='granted'){ showToast('Notification permission was not granted'); return; }
+    const reg = await navigator.serviceWorker.ready;
+    const subscription = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+    });
+    const { error } = await sb.from('push_subscriptions').upsert({
+      user_id: state._authUser.id,
+      subscription: subscription.toJSON(),
+      updated_at: new Date().toISOString(),
+    });
+    if(error) throw error;
+    state._pushEnabled = true;
+    showToast('Push notifications enabled');
+    render();
+  }catch(e){
+    console.error('push subscribe failed', e);
+    if(window.Sentry) Sentry.captureException(e);
+    showToast(`Couldn't enable notifications: ${e.message||e}`);
+  }
+}
+// Fire-and-forget — tells the server exactly when to push, so it still arrives even if the
+// app gets fully closed before the timer would have ended. Failing silently here is fine:
+// the in-app chime/notification (while the tab is open) already covers that common case.
+async function scheduleServerNotification(seconds, title, body){
+  if(!state._authUser) return;
+  try{
+    const { data: { session } } = await sb.auth.getSession();
+    const token = session ? session.access_token : SUPABASE_ANON_KEY;
+    await fetch(`${SUPABASE_URL}/functions/v1/schedule-notification`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json', 'Authorization':`Bearer ${token}`},
+      body: JSON.stringify({ seconds, title, body }),
+    });
+  }catch(e){ console.error('schedule notification failed', e); }
 }
 function notifyTimerDone(){
   if(typeof Notification!=='undefined' && Notification.permission==='granted'){
@@ -1154,8 +1242,10 @@ function updateSetField(exUid, idx, field, value){
 }
 function finishSession(){
   const s=activeSession(); if(!s) return;
+  const minutes = Number(state._sessionDurationMin)||0;
+  if(minutes<=0){ showToast('Enter how long this session took — needed to estimate calories burned'); return; }
   s.active=false;
-  s.durationMin = Number(state._sessionDurationMin)||0;
+  s.durationMin = minutes;
   state._skipRepeat=false;
   state.builderMuscles=[];
   state._activeSupersetBlock=null;
@@ -1184,6 +1274,7 @@ function newCardioDraft(discipline){
     avgHR:'', cadence:'', power:'', swolf:'', gearId:'',
     nutriCount:'', nutriCalories:'', nutriCarbs:'',
     notes:'',
+    logDate: dateInputValue(todayISO()),
     intervalUnit: discipline==='swim' ? 'm' : 'm',  // meters by default — track/pool intervals are usually short
     warmupDistance:'',
     intervals:[{distance:'', reps:'', restM:'', restS:''}],
@@ -1230,7 +1321,7 @@ function saveCardioSession(){
   const distanceKm = draft.mode==='structured' ? cardioStructuredDistance(draft) : (Number(fromDisplayDistance(draft.distance))||0);
   const durationSec = parseDurationToSeconds(draft.durationH, draft.durationM, draft.durationS);
   const s = {
-    id:uid(), date:todayISO(), active:false, type:'cardio',
+    id:uid(), date:dateInputToISO(draft.logDate||dateInputValue(todayISO())), active:false, type:'cardio',
     discipline:draft.discipline, cardioType:draft.cardioType, mode:draft.mode,
     distance:distanceKm, duration:durationSec,
     avgHR:draft.avgHR, cadence:draft.cadence, power:draft.power, swolf:draft.swolf, gearId:draft.gearId||'',
@@ -1300,7 +1391,7 @@ const CIRCUIT_TYPE_DESCRIPTIONS = {
   amrap: '"As Many Rounds/Reps As Possible" — complete as many full rounds as you can within a fixed time cap.',
 };
 function allHyroxStationNames(){ return HYROX_STATIONS.concat(state.customHyroxStations); }
-function newHyroxDraft(){ return {stations:[], manualTotalTimeM:'', manualTotalTimeS:''}; }
+function newHyroxDraft(){ return {stations:[], manualTotalTimeM:'', manualTotalTimeS:'', logDate:dateInputValue(todayISO())}; }
 function hyroxValueTypeFor(name){ return HYROX_STATION_VALUE_TYPE[name] || 'distance'; }
 function addHyroxStation(name){
   if(!state._hyroxDraft) return;
@@ -1340,8 +1431,10 @@ function saveCustomHyroxStation(name){
 function saveHyroxSession(){
   const draft = state._hyroxDraft;
   if(!draft || !draft.stations.length){ showToast('Add at least one station first'); return; }
+  const totalSec = hyroxSessionTotalTimeSec({stations:draft.stations, manualTotalTimeM:draft.manualTotalTimeM, manualTotalTimeS:draft.manualTotalTimeS});
+  if(totalSec<=0){ showToast('Enter a time for at least one station, or an overall finish time — needed to estimate calories burned'); return; }
   const s = {
-    id:uid(), date:todayISO(), active:false, type:'hyrox',
+    id:uid(), date:dateInputToISO(draft.logDate||dateInputValue(todayISO())), active:false, type:'hyrox',
     stations: draft.stations.map(st=>({...st})),
     manualTotalTimeM: draft.manualTotalTimeM, manualTotalTimeS: draft.manualTotalTimeS,
   };
@@ -1521,21 +1614,17 @@ function calcBMR(){
 function calcActivityMultiplier(){
   const q = state.activityQ;
   const steps = Number(q.stepsPerDay)||0;
-  const otherSports = Number(q.otherSportsHours)||0;
   let mult = 1.2; // baseline for minimal movement
   mult += Math.min(0.25, (steps/10000)*0.15);   // caps out around 10k+ steps/day
-  mult += Math.min(0.15, otherSports*0.025);     // caps out around 6 hrs/week of other sports
-  mult = Math.min(1.6, mult); // ceiling for the non-training baseline — structured training is added separately, per day
+  mult = Math.min(1.45, mult); // ceiling for the non-training baseline — structured training and other sports are logged and added separately, per day
   return Math.round(mult*100)/100;
 }
 function activityMultiplierBreakdown(){
   const q = state.activityQ;
   const steps = Number(q.stepsPerDay)||0;
-  const otherSports = Number(q.otherSportsHours)||0;
   return [
     {label:'Baseline', value:1.2},
     {label:'Steps', value:Math.min(0.25, (steps/10000)*0.15)},
-    {label:'Other sports/wk', value:Math.min(0.15, otherSports*0.025)},
   ];
 }
 function calcTDEE(){
@@ -1762,6 +1851,43 @@ function calorieBurnForCardioSession(s, weightKg){
   const met = typeMets[s.cardioType] || CARDIO_MET_FALLBACK[s.discipline] || 8;
   return met*3.5*weightKg/200*minutes;
 }
+// "Other Sport" — anything outside Gym/Run/Bike/Swim/Hyrox, logged from the Today tab and
+// counted toward that day's calorie burn exactly like the other disciplines. "Extra Steps"
+// is a special first entry — additional steps on top of your Setup baseline, not a sport.
+const OTHER_SPORTS = [
+  'Extra Steps',
+  'Badminton','Baseball','Basketball','Boxing','Climbing','Cricket','CrossFit','Dancing',
+  'Football (Soccer)','Golf','Gymnastics','Hiking','Hockey','Ice Hockey','Jump Rope',
+  'Kickboxing','Martial Arts','Padel','Pickleball','Pilates','Rowing','Rugby','Skiing',
+  'Squash','Surfing','Table Tennis','Tennis','Volleyball','Yoga',
+];
+const OTHER_SPORT_MET = {
+  'Badminton':5.5,'Baseball':5.0,'Basketball':6.5,'Boxing':9.0,'Climbing':8.0,'Cricket':5.0,
+  'CrossFit':8.0,'Dancing':5.5,'Football (Soccer)':7.0,'Golf':4.5,'Gymnastics':4.0,'Hiking':6.0,
+  'Hockey':8.0,'Ice Hockey':8.0,'Jump Rope':10.0,'Kickboxing':8.0,'Martial Arts':7.0,'Padel':6.0,
+  'Pickleball':5.0,'Pilates':3.5,'Rowing':7.0,'Rugby':8.5,'Skiing':7.0,'Squash':10.0,'Surfing':5.0,
+  'Table Tennis':4.0,'Tennis':7.0,'Volleyball':4.0,'Yoga':2.5,
+};
+function calorieBurnForOtherSportLog(log, weightKg){
+  if(log.sport==='Extra Steps'){
+    // A commonly-cited rough approximation (~0.0005 kcal per step per kg bodyweight) —
+    // stated as an estimate, same honesty standard as everything else in this app.
+    return (Number(log.extraSteps)||0) * weightKg * 0.0005;
+  }
+  const minutes = Number(log.durationMin)||0;
+  if(minutes<=0) return 0;
+  const hr = Number(log.avgHR)||0;
+  const p = state.nutritionProfile;
+  const age = Number(p.age)||0;
+  if(hr>=90 && age>0){
+    const kcalPerMin = p.sex==='female'
+      ? (-20.4022 + 0.4472*hr - 0.1263*weightKg + 0.074*age)/4.184
+      : (-55.0969 + 0.6309*hr + 0.1988*weightKg + 0.2017*age)/4.184;
+    if(kcalPerMin>2) return kcalPerMin*minutes;
+  }
+  const met = OTHER_SPORT_MET[log.sport] || 6.0;
+  return met*3.5*weightKg/200*minutes;
+}
 // Gym sessions now track an optional duration; use it when present instead of a flat guess.
 function gymSessionTotalSets(s){
   return (s.blocks||[]).reduce((sum,b)=>sum+(b.exercises||[]).reduce((s2,e)=>s2+(e.sets||[]).filter(st=>st.filled).length,0),0);
@@ -1791,10 +1917,12 @@ function autoEstimateTodayBurn(){
   const todaysCardio = cardioSessions().filter(s=>dateKey(s.date)===todayKey());
   const todaysGym = pastGymSessions().filter(s=>dateKey(s.date)===todayKey());
   const todaysHyrox = pastHyroxSessions().filter(s=>dateKey(s.date)===todayKey());
+  const todaysOtherSports = state.otherSportLogs.filter(l=>dateKey(l.date)===todayKey());
   let kcal = 0;
   todaysCardio.forEach(s=>{ kcal += calorieBurnForCardioSession(s, w); });
   todaysGym.forEach(s=>{ kcal += calorieBurnForGymSession(s, w); });
   todaysHyrox.forEach(s=>{ kcal += calorieBurnForHyroxSession(s, w); });
+  todaysOtherSports.forEach(l=>{ kcal += calorieBurnForOtherSportLog(l, w); });
   return Math.round(kcal);
 }
 function autoEstimateTodayBurnRange(){
@@ -1816,6 +1944,10 @@ function logWeight(weightDisplayValue){
   else state.weightLogs.push({id:uid(), date:todayISO(), weightKg:kg});
   saveData(); render();
   showToast('Weight logged');
+}
+function deleteWeightLog(id){
+  state.weightLogs = state.weightLogs.filter(w=>w.id!==id);
+  saveData(); render();
 }
 function recentWeightLogs(n){
   return state.weightLogs.slice().sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,n||10);
@@ -1979,7 +2111,16 @@ function onboardingStep2(){
       <button class="chip small ${state.unit==='lb'?'active':''}" data-unit="lb">lb</button>
     </div>
     <div class="row wrap" style="gap:8px;margin-top:10px;">
-      <div style="flex:1;min-width:90px;"><label class="tiny muted">Height (${heightUnitLabel()})</label><input type="text" inputmode="decimal" value="${toDisplayHeight(p.heightCm)}" id="onboarding-height"></div>
+      <div style="flex:1;min-width:90px;">
+        <label class="tiny muted">Height</label>
+        ${state.heightUnit==='in' ? (()=>{
+          const fi = heightCmToFeetIn(p.heightCm);
+          return `<div class="row" style="gap:4px;">
+            <input type="text" inputmode="numeric" placeholder="ft" value="${fi.feet}" id="onboarding-height-feet" style="width:56px;">
+            <input type="text" inputmode="decimal" placeholder="in" value="${fi.inches}" id="onboarding-height-inches" style="width:56px;">
+          </div>`;
+        })() : `<input type="text" inputmode="decimal" placeholder="cm" value="${toDisplayHeight(p.heightCm)}" id="onboarding-height">`}
+      </div>
       <div style="flex:1;min-width:70px;"><label class="tiny muted">Age</label><input type="text" inputmode="numeric" value="${p.age}" id="onboarding-age"></div>
       <div style="flex:1;min-width:90px;"><label class="tiny muted">Weight (${unitLabel()})</label><input type="text" inputmode="decimal" id="onboarding-weight"></div>
     </div>
@@ -1990,9 +2131,8 @@ function onboardingStep2(){
     </div>
     <div class="row wrap" style="gap:8px;margin-top:10px;">
       <div style="flex:1;min-width:110px;"><label class="tiny muted">Steps/day (avg)</label><input type="text" inputmode="numeric" value="${state.activityQ.stepsPerDay}" id="onboarding-steps"></div>
-      <div style="flex:1;min-width:110px;"><label class="tiny muted">Other sports (hrs/wk)</label><input type="text" inputmode="decimal" value="${state.activityQ.otherSportsHours}" id="onboarding-sports"></div>
     </div>
-    <p class="tiny muted" style="margin:4px 0 0 0;">"Other sports" means anything outside Gym/Run/Bike/Swim/Hyrox — those already count automatically from what you log.</p>
+    <p class="tiny muted" style="margin:4px 0 0 0;">Playing a sport regularly? Log it from the Today tab — it counts toward that day's calories burned directly, more accurately than a weekly average.</p>
     <label class="tiny muted" style="display:block;margin-top:10px;">Goal</label>
     <div class="row wrap" style="gap:8px;margin-top:4px;">
       <button class="chip small ${p.goal==='cut'?'active':''}" data-onboarding-goal="cut">Cutting</button>
@@ -2039,14 +2179,19 @@ function attachOnboardingHandlers(){
 
   const heightInput = document.getElementById('onboarding-height');
   if(heightInput) heightInput.oninput=()=>{ state.nutritionProfile.heightCm = fromDisplayHeight(heightInput.value); };
+  const heightFeetInput = document.getElementById('onboarding-height-feet');
+  const heightInchesInput = document.getElementById('onboarding-height-inches');
+  if(heightFeetInput && heightInchesInput){
+    const updateFeetIn = ()=>{ state.nutritionProfile.heightCm = feetInToCm(heightFeetInput.value, heightInchesInput.value); };
+    heightFeetInput.oninput = updateFeetIn;
+    heightInchesInput.oninput = updateFeetIn;
+  }
   const ageInput = document.getElementById('onboarding-age');
   if(ageInput) ageInput.oninput=()=>{ state.nutritionProfile.age = ageInput.value; };
   const weightInput = document.getElementById('onboarding-weight');
   if(weightInput) weightInput.oninput=()=>{ state._onboardingWeight = weightInput.value; };
   const stepsInput = document.getElementById('onboarding-steps');
   if(stepsInput) stepsInput.oninput=()=>{ state.activityQ.stepsPerDay = stepsInput.value; };
-  const sportsInput = document.getElementById('onboarding-sports');
-  if(sportsInput) sportsInput.oninput=()=>{ state.activityQ.otherSportsHours = sportsInput.value; };
   document.querySelectorAll('[data-onboarding-sex]').forEach(el=>el.onclick=()=>{ state.nutritionProfile.sex=el.dataset.onboardingSex; render(); });
   document.querySelectorAll('[data-onboarding-goal]').forEach(el=>el.onclick=()=>{ state.nutritionProfile.goal=el.dataset.onboardingGoal; render(); });
   document.querySelectorAll('[data-onboarding-rate]').forEach(el=>el.onclick=()=>{ state.nutritionProfile.weeklyRateKg=Number(el.dataset.onboardingRate); render(); });
@@ -2260,6 +2405,63 @@ function todayView(){
   return cardioTypeScreen(state._logChoice);
 }
 
+function saveOtherSportLog(){
+  const sport = state._otherSportPick;
+  if(!sport){ showToast('Pick a sport first'); return; }
+  const log = {id:uid(), date:todayISO(), sport};
+  if(sport==='Extra Steps'){
+    const steps = Number(state._otherSportSteps)||0;
+    if(steps<=0){ showToast('Enter how many extra steps'); return; }
+    log.extraSteps = steps;
+  }else{
+    const minutes = Number(state._otherSportDuration)||0;
+    if(minutes<=0){ showToast('Enter how long you did this for'); return; }
+    log.durationMin = minutes;
+    log.avgHR = state._otherSportHR||'';
+  }
+  state.otherSportLogs.push(log);
+  state._otherSportPick=''; state._otherSportDuration=''; state._otherSportHR=''; state._otherSportSteps='';
+  saveData(); render();
+  showToast(`${sport} logged`);
+}
+function deleteOtherSportLog(id){
+  state.otherSportLogs = state.otherSportLogs.filter(l=>l.id!==id);
+  saveData(); render();
+}
+function otherSportCard(){
+  const pick = state._otherSportPick;
+  const isExtraSteps = pick==='Extra Steps';
+  const todaysLogs = state.otherSportLogs.filter(l=>dateKey(l.date)===todayKey());
+  const w = currentWeightKg()||70;
+  return `<div class="card">
+    <p class="card-title">Log another sport</p>
+    <p class="tiny muted" style="margin:0 0 10px 0;">Anything outside Gym/Run/Bike/Swim/Hyrox — counts toward today's calories burned.</p>
+    <select id="other-sport-select" style="margin-bottom:10px;">
+      <option value="">Select a sport…</option>
+      ${OTHER_SPORTS.map(s=>`<option value="${s}" ${pick===s?'selected':''}>${s}</option>`).join('')}
+    </select>
+    ${pick ? (isExtraSteps ? `
+      <label class="tiny muted">Amount of steps on top of the amount you have entered in Setup</label>
+      <input type="text" inputmode="numeric" placeholder="e.g. 3000" value="${state._otherSportSteps}" id="other-sport-steps" style="margin-bottom:10px;">
+    ` : `
+      <div class="row wrap" style="gap:10px;margin-bottom:10px;">
+        <div style="flex:1;min-width:100px;"><label class="tiny muted">Duration (min)</label><input type="text" inputmode="numeric" value="${state._otherSportDuration}" id="other-sport-duration"></div>
+        <div style="flex:1;min-width:100px;"><label class="tiny muted">Avg HR — optional, for more accuracy</label><input type="text" inputmode="numeric" value="${state._otherSportHR}" id="other-sport-hr"></div>
+      </div>
+    `) : ''}
+    ${pick ? `<button class="btn btn-accent btn-block" id="save-other-sport-btn">Log ${pick}</button>` : ''}
+    ${todaysLogs.length ? `
+      <p class="tiny muted" style="text-transform:uppercase;letter-spacing:0.6px;margin:14px 0 6px 0;">Logged today</p>
+      ${todaysLogs.map(l=>`<div class="row between small" style="padding:6px 0;border-bottom:1px solid var(--border);">
+        <span>${l.sport}${l.sport==='Extra Steps' ? ` — ${l.extraSteps} steps` : ` — ${l.durationMin} min`}</span>
+        <div class="row" style="gap:8px;align-items:center;">
+          <span class="mono tiny muted">${Math.round(calorieBurnForOtherSportLog(l, w))} kcal</span>
+          <button class="btn btn-ghost btn-sm" data-delete-other-sport="${l.id}">✕</button>
+        </div>
+      </div>`).join('')}
+    ` : ''}
+  </div>`;
+}
 function readinessCheckInCard(){
   const today = todaysReadiness();
   return `<div class="card">
@@ -2276,6 +2478,7 @@ function readinessCheckInCard(){
 function logChoiceScreen(){
   return `
     ${readinessCheckInCard()}
+    ${otherSportCard()}
     <div class="card">
       <p class="card-title">What do you want to log?</p>
       <h2 class="display" style="font-size:26px;margin:0 0 4px 0;">${new Date().toLocaleDateString(undefined,{weekday:'long', month:'long', day:'numeric'})}</h2>
@@ -2365,6 +2568,7 @@ function exercisePickerCard(muscle){
   const exs = sortByName(allExercises().filter(e=>e.muscle===muscle));
   return `<div class="card">
     <p class="card-title">${muscle} — tap to select, then add</p>
+    <button class="btn btn-ghost btn-block btn-sm" data-add-custom-for="${muscle}" style="margin-bottom:10px;">Don't see it? + Add your own ${muscle.toLowerCase()} exercise</button>
     ${exs.map(ex=>{
       const excluded = isExcluded(ex);
       const selected = state._multiSelectExercises.includes(ex.id);
@@ -2376,7 +2580,6 @@ function exercisePickerCard(muscle){
         ${excluded?`<button class="btn btn-ghost btn-sm" data-override="${ex.id}">Keep anyway</button>`:`<button class="btn ${selected?'btn-accent':'btn-ghost'} btn-sm" data-toggle-multiselect="${ex.id}">${selected?'✓ Selected':'+ Select'}</button>`}
       </div>`;
     }).join('')}
-    <button class="btn btn-ghost btn-block btn-sm" data-add-custom-for="${muscle}" style="margin-top:6px;">Don't see it? + Add your own ${muscle.toLowerCase()} exercise</button>
   </div>`;
 }
 
@@ -2396,6 +2599,8 @@ function cardioBuilderView(){
         <p class="card-title" style="color:var(--accent);margin:0;">${DISCIPLINE_LABELS[d.discipline]} — ${d.cardioType||'pick a type'}</p>
         <button class="btn btn-ghost btn-sm" id="cancel-cardio-draft">Cancel</button>
       </div>
+      <label class="tiny muted">Date — change this if you're logging a session from an earlier day</label>
+      <input type="date" id="cardio-log-date" value="${d.logDate}" style="max-width:180px;margin-bottom:6px;">
       ${d.cardioType ? (()=>{
         const last = lastCardioTypeSummary(d.discipline, d.cardioType);
         return last ? `<div class="tiny muted" style="margin-top:4px;">Last ${d.cardioType} (${fmtDate(last.date)}): ${fmtDistance(last.distance)} ${distUnitLabel()}${last.pace?` at ${last.pace}`:''}</div>` : '';
@@ -2813,7 +3018,8 @@ function hyroxBuilderView(){
     </div>
     <div class="card" style="border-color:var(--accent);">
       <p class="card-title" style="color:var(--accent);margin:0;">Hyrox</p>
-      <div class="small muted">${new Date().toLocaleDateString(undefined,{weekday:'long', month:'short', day:'numeric'})}</div>
+      <label class="tiny muted" style="display:block;margin-top:8px;">Date — change this if you're logging a workout from an earlier day</label>
+      <input type="date" id="hyrox-log-date" value="${d.logDate}" style="max-width:180px;">
       ${d.stations.length ? `<div class="row wrap" style="gap:14px;margin-top:10px;">
         <div><div class="tiny muted">Total distance</div><div class="mono" style="font-size:16px;">${fmtDistance(totalKm)} ${distUnitLabel()}</div></div>
         <div><div class="tiny muted">Total time</div><div class="mono" style="font-size:16px;">${fmtDuration(totalSec)}</div></div>
@@ -3328,7 +3534,16 @@ function nutritionSetupTab(){
     <div class="card">
       <p class="card-title">Your profile</p>
       <div class="row wrap" style="gap:10px;">
-        <div style="flex:1;min-width:100px;"><label class="tiny muted">Height (${heightUnitLabel()})</label><input type="text" inputmode="decimal" value="${toDisplayHeight(p.heightCm)}" id="nutrition-height-input"></div>
+        <div style="flex:1;min-width:100px;">
+          <label class="tiny muted">Height</label>
+          ${state.heightUnit==='in' ? (()=>{
+            const fi = heightCmToFeetIn(p.heightCm);
+            return `<div class="row" style="gap:4px;">
+              <input type="text" inputmode="numeric" placeholder="ft" value="${fi.feet}" id="nutrition-height-feet" style="width:56px;">
+              <input type="text" inputmode="decimal" placeholder="in" value="${fi.inches}" id="nutrition-height-inches" style="width:56px;">
+            </div>`;
+          })() : `<input type="text" inputmode="decimal" placeholder="cm" value="${toDisplayHeight(p.heightCm)}" id="nutrition-height-input">`}
+        </div>
         <div style="flex:1;min-width:80px;"><label class="tiny muted">Age</label><input type="text" inputmode="numeric" value="${p.age}" data-nutrition-profile="age" id="nutrition-age-input"></div>
       </div>
       <div class="row wrap" style="gap:8px;margin-top:10px;">
@@ -3340,11 +3555,11 @@ function nutritionSetupTab(){
 
     <div class="card">
       <p class="card-title">Activity</p>
-      <p class="small muted" style="margin-top:0;">This is your baseline — steps and casual/unlogged sports only. Structured Gym/Run/Bike/Swim (and Hyrox) training is deliberately <strong>not</strong> averaged in here, since that would credit a rest day for last week's hard sessions. Instead, training calories are added on top only on the day you actually log them — see "Extra calories burned today" on the Today tab.</p>
+      <p class="small muted" style="margin-top:0;">This is your baseline — steps only. Structured Gym/Run/Bike/Swim/Hyrox training, and any other sport you log from Today, are deliberately <strong>not</strong> averaged in here, since that would credit a rest day for last week's hard sessions. Instead, those calories are added on top only on the day you actually log them.</p>
       <div class="row wrap" style="gap:10px;">
         <div style="flex:1;min-width:110px;"><label class="tiny muted">Steps/day (avg)</label><input type="text" inputmode="numeric" value="${state.activityQ.stepsPerDay}" data-activity-field="stepsPerDay" id="activity-steps-input"></div>
-        <div style="flex:1;min-width:110px;"><label class="tiny muted">Other sports (hrs/wk) — not Gym, Run, Bike, Swim, or Hyrox</label><input type="text" inputmode="decimal" value="${state.activityQ.otherSportsHours}" data-activity-field="otherSportsHours" id="activity-sports-input"></div>
       </div>
+      <p class="tiny muted" style="margin:8px 0 0 0;">Play a sport regularly? Log it from the Today tab instead — it counts toward that day's calories burned directly.</p>
     </div>
 
     <div class="card">
@@ -3493,18 +3708,32 @@ function nutritionWeightTab(){
       ${recent.length ? recent.map(w=>`
         <div class="row between small" style="padding:6px 0;border-bottom:1px solid var(--border);">
           <span class="muted">${fmtDate(w.date)}</span>
-          <span class="mono">${toDisplayWeight(w.weightKg)} ${unitLabel()}</span>
+          <div class="row" style="gap:10px;align-items:center;">
+            <span class="mono">${toDisplayWeight(w.weightKg)} ${unitLabel()}</span>
+            <button class="btn btn-ghost btn-sm" data-delete-weight-log="${w.id}">✕</button>
+          </div>
         </div>
       `).join('') : `<p class="small muted" style="margin:0;">No weigh-ins logged yet.</p>`}
     </div>
   `;
 }
 
+function dateInputValue(isoString){
+  const d = new Date(isoString);
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+// Constructed at noon local time specifically to avoid a date-only input accidentally
+// shifting to the previous/next day when converted through timezone-aware Date math.
+function dateInputToISO(dateStr){
+  const [y,m,d] = dateStr.split('-').map(Number);
+  return new Date(y, m-1, d, 12, 0, 0).toISOString();
+}
 function activeSessionView(s){
   return `
     <div class="card" style="border-color:var(--accent);">
       <p class="card-title" style="color:var(--accent);margin-bottom:2px;">Workout in progress</p>
-      <div class="small muted">${new Date(s.date).toLocaleDateString(undefined,{weekday:'long', month:'short', day:'numeric'})}</div>
+      <label class="tiny muted">Date — change this if you're logging a workout from an earlier day</label>
+      <input type="date" id="active-session-date" value="${dateInputValue(s.date)}" style="max-width:180px;">
     </div>
 
     ${s.blocks.map(block=>blockView(block)).join('')}
@@ -3521,9 +3750,9 @@ function activeSessionView(s){
       <button class="btn btn-ghost" id="add-exercise-btn">+ Add Another Exercise</button>
     </div>
 
-    <div class="card" style="margin-top:14px;">
-      <label class="tiny muted">Session duration (minutes) — powers today's calorie-burn estimate</label>
-      <input type="number" inputmode="numeric" placeholder="e.g. 60" value="${state._sessionDurationMin||''}" id="session-duration-input">
+    <div class="card" style="margin-top:14px;border-color:var(--accent);">
+      <label class="tiny muted">Session duration (minutes) — <strong style="color:var(--accent);">required</strong>, powers today's calorie-burn estimate</label>
+      <input type="text" inputmode="numeric" placeholder="e.g. 60" value="${state._sessionDurationMin||''}" id="session-duration-input">
     </div>
 
     <div class="row" style="gap:10px;margin-top:20px;">
@@ -3677,6 +3906,7 @@ function exercisePickerModal(){
       <div class="row wrap" style="margin-bottom:10px;">
         ${MUSCLE_GROUPS.map(m=>`<button class="chip small ${state._pickerMuscle===m && !search?'active':''}" data-picker-muscle="${m}">${m}</button>`).join('')}
       </div>
+      <button class="btn btn-ghost btn-block btn-sm" data-add-custom-for="${state._pickerMuscle||''}" style="margin-bottom:10px;">Don't see it? + Add your own exercise</button>
       ${list.length ? list.map(ex=>{
         const excluded = isExcluded(ex);
         const selected = state._multiSelectExercises.includes(ex.id);
@@ -3685,7 +3915,6 @@ function exercisePickerModal(){
           ${excluded?`<button class="btn btn-ghost btn-sm" data-override="${ex.id}">Keep anyway</button>`:`<button class="btn ${selected?'btn-accent':'btn-ghost'} btn-sm" data-toggle-multiselect="${ex.id}">${selected?'✓ Selected':'+ Select'}</button>`}
         </div>`;
       }).join('') : `<p class="small muted" style="padding:10px 0;">No exercises match "${state._pickerSearch}".</p>`}
-      <button class="btn btn-ghost btn-block btn-sm" data-add-custom-for="${state._pickerMuscle||''}" style="margin:6px 0;">Don't see it? + Add your own exercise</button>
       <button class="btn btn-ghost btn-block" id="close-picker" style="margin-top:8px;">Close</button>
     </div>
   </div>`;
@@ -4445,7 +4674,7 @@ function dashboardView(){
   });
 
   return `
-    <div class="card">
+    <div class="card" style="position:sticky;top:57px;z-index:15;">
       <p class="card-title">Date range</p>
       <div class="row wrap" style="gap:8px;margin-bottom:10px;">
         ${[['week','Last Week'],['month','Last Month'],['3months','Last 3 Months'],['year','Last Year'],['custom','Custom']].map(([id,label])=>
@@ -4743,6 +4972,12 @@ function settingsView(){
     </div>
 
     <div class="card">
+      <p class="card-title">Push notifications</p>
+      <p class="small muted" style="margin:0 0 10px 0;">Get a real phone notification when a rest timer finishes — including if you've closed the app, since the server keeps track of the countdown, not just your phone (accurate to about a minute, not the exact second).</p>
+      <button class="btn btn-accent btn-block" id="enable-push-btn">Enable Push Notifications</button>
+    </div>
+
+    <div class="card">
       <p class="card-title">Food search (branded &amp; USDA database)</p>
       <p class="small muted" style="margin-top:0;">Live search runs through a shared server-side function now, with results cached across every user — once someone searches a food, everyone after them gets it instantly with no repeat lookups. Nothing to set up here on your end.</p>
     </div>
@@ -4849,6 +5084,17 @@ function attachHandlers(){
   if(retrySaveBtn) retrySaveBtn.onclick=()=>attemptSave(2);
 
   document.querySelectorAll('[data-log-readiness]').forEach(el=>el.onclick=()=>logReadiness(Number(el.dataset.logReadiness)));
+  const otherSportSelect = document.getElementById('other-sport-select');
+  if(otherSportSelect) otherSportSelect.onchange=()=>{ state._otherSportPick = otherSportSelect.value; render(); };
+  const otherSportDurationInput = document.getElementById('other-sport-duration');
+  if(otherSportDurationInput) otherSportDurationInput.oninput=()=>{ state._otherSportDuration = otherSportDurationInput.value; };
+  const otherSportHRInput = document.getElementById('other-sport-hr');
+  if(otherSportHRInput) otherSportHRInput.oninput=()=>{ state._otherSportHR = otherSportHRInput.value; };
+  const otherSportStepsInput = document.getElementById('other-sport-steps');
+  if(otherSportStepsInput) otherSportStepsInput.oninput=()=>{ state._otherSportSteps = otherSportStepsInput.value; };
+  const saveOtherSportBtn = document.getElementById('save-other-sport-btn');
+  if(saveOtherSportBtn) saveOtherSportBtn.onclick=saveOtherSportLog;
+  document.querySelectorAll('[data-delete-other-sport]').forEach(el=>el.onclick=()=>deleteOtherSportLog(el.dataset.deleteOtherSport));
   document.querySelectorAll('[data-log-choice]').forEach(el=>el.onclick=()=>{
     state._logChoice = el.dataset.logChoice;
     if(state._logChoice==='hyrox') state._hyroxDraft = newHyroxDraft();
@@ -4867,6 +5113,8 @@ function attachHandlers(){
   });
   const cancelCardioBtn = document.getElementById('cancel-cardio-draft');
   if(cancelCardioBtn) cancelCardioBtn.onclick=cancelCardioDraft;
+  const cardioLogDateInput = document.getElementById('cardio-log-date');
+  if(cardioLogDateInput) cardioLogDateInput.onchange=()=>{ state._cardioDraft.logDate = cardioLogDateInput.value; };
   document.querySelectorAll('[data-interval-unit]').forEach(el=>el.onclick=()=>{
     const d = state._cardioDraft; if(!d) return;
     const newUnit = el.dataset.intervalUnit;
@@ -4906,6 +5154,8 @@ function attachHandlers(){
 
   const discardHyroxBtn = document.getElementById('discard-hyrox-btn');
   if(discardHyroxBtn) discardHyroxBtn.onclick=discardHyroxDraft;
+  const hyroxLogDateInput = document.getElementById('hyrox-log-date');
+  if(hyroxLogDateInput) hyroxLogDateInput.onchange=()=>{ state._hyroxDraft.logDate = hyroxLogDateInput.value; };
   const hyroxManualTimeM = document.getElementById('hyrox-manual-time-m');
   if(hyroxManualTimeM) hyroxManualTimeM.oninput=()=>{ state._hyroxDraft.manualTotalTimeM = hyroxManualTimeM.value; };
   const hyroxManualTimeS = document.getElementById('hyrox-manual-time-s');
@@ -5070,6 +5320,12 @@ function attachHandlers(){
 
   const addExBtn = document.getElementById('add-exercise-btn');
   if(addExBtn) addExBtn.onclick=()=>{ state._editingSessionTargetId=null; state._showPicker=true; state._pickerMuscle=null; state._pickerSearch=''; state._multiSelectExercises=[]; render(); };
+  const activeSessionDateInput = document.getElementById('active-session-date');
+  if(activeSessionDateInput) activeSessionDateInput.onchange=()=>{
+    const s = activeSession(); if(!s) return;
+    s.date = dateInputToISO(activeSessionDateInput.value);
+    saveData(); render();
+  };
   const finishSupersetBtn = document.getElementById('finish-superset-btn');
   if(finishSupersetBtn) finishSupersetBtn.onclick=finishSuperset;
   document.querySelectorAll('[data-make-superset]').forEach(el=>el.onclick=()=>{
@@ -5172,6 +5428,8 @@ function attachHandlers(){
   if(logoutBtn) logoutBtn.onclick=logOut;
   const toggleRemindersBtn = document.getElementById('toggle-reminders-btn');
   if(toggleRemindersBtn) toggleRemindersBtn.onclick=()=>{ state.remindersEnabled=!state.remindersEnabled; saveData(); render(); };
+  const enablePushBtn = document.getElementById('enable-push-btn');
+  if(enablePushBtn) enablePushBtn.onclick=enablePushNotifications;
   const exportDataBtn = document.getElementById('export-data-btn');
   if(exportDataBtn) exportDataBtn.onclick=exportAllDataJSON;
   const deleteDataBtn = document.getElementById('delete-data-btn');
@@ -5300,6 +5558,13 @@ function attachHandlers(){
   });
   const nutritionHeightInput = document.getElementById('nutrition-height-input');
   if(nutritionHeightInput) nutritionHeightInput.oninput=()=>{ state.nutritionProfile.heightCm = fromDisplayHeight(nutritionHeightInput.value); saveData(); render(); };
+  const nutritionHeightFeet = document.getElementById('nutrition-height-feet');
+  const nutritionHeightInches = document.getElementById('nutrition-height-inches');
+  if(nutritionHeightFeet && nutritionHeightInches){
+    const updateFeetIn = ()=>{ state.nutritionProfile.heightCm = feetInToCm(nutritionHeightFeet.value, nutritionHeightInches.value); saveData(); render(); };
+    nutritionHeightFeet.oninput = updateFeetIn;
+    nutritionHeightInches.oninput = updateFeetIn;
+  }
   document.querySelectorAll('[data-nutrition-sex]').forEach(el=>el.onclick=()=>{ state.nutritionProfile.sex=el.dataset.nutritionSex; saveData(); render(); });
   document.querySelectorAll('[data-nutrition-goal]').forEach(el=>el.onclick=()=>{ state.nutritionProfile.goal=el.dataset.nutritionGoal; saveData(); render(); });
   document.querySelectorAll('[data-nutrition-rate]').forEach(el=>el.onclick=()=>{ state.nutritionProfile.weeklyRateKg=Number(el.dataset.nutritionRate); saveData(); render(); });
@@ -5415,6 +5680,7 @@ function attachHandlers(){
     const val = document.getElementById('weight-log-input').value;
     logWeight(val);
   };
+  document.querySelectorAll('[data-delete-weight-log]').forEach(el=>el.onclick=()=>deleteWeightLog(el.dataset.deleteWeightLog));
   const applyRollingBtn = document.getElementById('apply-rolling-tdee-btn');
   if(applyRollingBtn) applyRollingBtn.onclick=()=>{
     const r = rolling14DayEstimate();
@@ -5455,6 +5721,7 @@ function attachHandlers(){
 /* ============================= INIT ============================= */
 // Runs once on page load, and again every time auth state changes (login, logout, token
 // refresh) — the single source of truth for "are we logged in, and if so, whose data is this."
+registerServiceWorker();
 sb.auth.onAuthStateChange((event, session)=>{
   if(session && session.user){
     const isNewLogin = !state._authUser || state._authUser.id !== session.user.id;
