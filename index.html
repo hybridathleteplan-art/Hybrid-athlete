@@ -1080,23 +1080,32 @@ async function enablePushNotifications(){
 // fastest way to isolate exactly which link in the chain is broken.
 async function sendTestNotification(){
   if(!state._pushEnabled){ showToast('Enable push notifications first'); return; }
-  await scheduleServerNotification(10, 'Test notification', 'If you see this, push notifications are fully working!');
-  showToast('Test scheduled — should arrive in about 10-25 seconds. Lock your screen or switch apps now.');
+  const result = await scheduleServerNotification(10, 'Test notification', 'If you see this, push notifications are fully working!');
+  if(result.ok) showToast('Test scheduled — should arrive in about 10-25 seconds. Lock your screen or switch apps now.');
+  else showToast(`Scheduling failed: ${result.error}`);
 }
 // Fire-and-forget — tells the server exactly when to push, so it still arrives even if the
 // app gets fully closed before the timer would have ended. Failing silently here is fine:
 // the in-app chime/notification (while the tab is open) already covers that common case.
 async function scheduleServerNotification(seconds, title, body){
-  if(!state._authUser) return;
+  if(!state._authUser) return {ok:false, error:'Not logged in'};
   try{
     const { data: { session } } = await sb.auth.getSession();
     const token = session ? session.access_token : SUPABASE_ANON_KEY;
-    await fetch(`${SUPABASE_URL}/functions/v1/schedule-notification`, {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/schedule-notification`, {
       method:'POST',
       headers:{'Content-Type':'application/json', 'Authorization':`Bearer ${token}`},
       body: JSON.stringify({ seconds, title, body }),
     });
-  }catch(e){ console.error('schedule notification failed', e); }
+    let data;
+    try{ data = await res.json(); }catch(_){ data = null; }
+    if(!res.ok || (data && data.error)) return {ok:false, error:(data&&data.error)||('HTTP '+res.status)};
+    return {ok:true};
+  }catch(e){
+    console.error('schedule notification failed', e);
+    if(window.Sentry) Sentry.captureException(e);
+    return {ok:false, error:e.message||String(e)};
+  }
 }
 function notifyTimerDone(){
   if(typeof Notification!=='undefined' && Notification.permission==='granted'){
@@ -3868,17 +3877,18 @@ function exerciseLogView(e, supersetIdx, blockId){
   const collapsed = isExerciseCollapsed(e);
 
   if(collapsed){
-    const filledCount = e.sets.filter(s=>s.filled).length;
-    const top = e.weighted ? topSetWeightAndReps(e.sets) : null;
-    const summary = (e.weighted && top && top.weight>0)
-      ? `${filledCount} set${filledCount!==1?'s':''} · top ${toDisplayWeightForUnit(top.weight, exerciseWeightUnit(e))}${exerciseWeightUnit(e)}×${top.reps}`
-      : `${filledCount} set${filledCount!==1?'s':''} logged`;
+    const wUnit = exerciseWeightUnit(e);
+    const filledSets = e.sets.filter(s=>s.filled);
+    const setLines = filledSets.map((s,idx)=> e.weighted
+      ? `Set ${idx+1}: ${toDisplayWeightForUnit(s.weight, wUnit)}${wUnit} × ${s.reps} reps`
+      : `Set ${idx+1}: ${s.reps} reps`
+    );
     return `<div class="card" data-exuid="${e.uid}" data-toggle-exercise-collapse="${e.uid}" style="cursor:pointer;">
       <div class="row between">
         <div>
           ${supersetIdx>=0?`<div class="tiny" style="color:var(--accent);text-transform:uppercase;letter-spacing:0.6px;font-weight:700;margin-bottom:2px;">${ordinal(supersetIdx+1)} exercise of superset</div>`:''}
           <div class="ex-name">${ex.name} ${isPlat?'<span class="plateau-badge">⚠ NO PROGRESS</span>':''}</div>
-          <div class="ex-meta">${summary}</div>
+          ${setLines.length ? setLines.map(line=>`<div class="tiny muted" style="margin-top:2px;">${line}</div>`).join('') : `<div class="ex-meta">No sets logged yet</div>`}
         </div>
         <button class="btn btn-ghost btn-sm" data-toggle-exercise-collapse="${e.uid}">▼ Expand</button>
       </div>
