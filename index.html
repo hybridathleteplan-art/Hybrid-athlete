@@ -450,7 +450,9 @@ let state = {
   _otherSportDuration:'',
   _otherSportHR:'',
   _otherSportSteps:'',
+  _otherSportStepsMode:'extra',
   _pushEnabled:false,
+  _pushWorking:false,
   _helpExpandedTopics:{},
   onboardingDone:false,
   _onboardingStep:1,
@@ -1006,8 +1008,22 @@ function requestNotificationPermission(){
 // people away.
 function registerServiceWorker(){
   if('serviceWorker' in navigator){
-    navigator.serviceWorker.register('/sw.js').catch(e=>console.error('SW registration failed', e));
+    navigator.serviceWorker.register('/sw.js')
+      .then(()=>checkPushSubscriptionStatus())
+      .catch(e=>{ console.error('SW registration failed', e); if(window.Sentry) Sentry.captureException(e); });
   }
+}
+// Reflects the ACTUAL current subscription state (not just a flag that resets on reload) —
+// so the Settings button correctly shows "on" after a page reload if you're really subscribed.
+async function checkPushSubscriptionStatus(){
+  try{
+    if(!('serviceWorker' in navigator)) return;
+    const reg = await navigator.serviceWorker.getRegistration();
+    if(!reg){ state._pushEnabled=false; render(); return; }
+    const sub = await reg.pushManager.getSubscription();
+    state._pushEnabled = !!sub;
+    render();
+  }catch(e){ /* non-fatal — button just shows "off" if this can't be determined */ }
 }
 function urlBase64ToUint8Array(base64String){
   const padding = '='.repeat((4 - base64String.length % 4) % 4);
@@ -1017,20 +1033,30 @@ function urlBase64ToUint8Array(base64String){
   for(let i=0;i<rawData.length;i++) outputArray[i] = rawData.charCodeAt(i);
   return outputArray;
 }
+// A plain Promise never resolving is invisible to a user — no error, no success, the button
+// just silently does nothing forever. This turns that specific failure mode into a real,
+// actionable message instead of a hang.
+function withTimeout(promise, ms, label){
+  return Promise.race([
+    promise,
+    new Promise((_,reject)=>setTimeout(()=>reject(new Error(`${label} took too long — service worker may not be registered correctly`)), ms)),
+  ]);
+}
 // Called from a Settings button tap — never on page load, so people aren't hit with an
 // unexpected permission prompt the moment they open the app.
 async function enablePushNotifications(){
   if(!('serviceWorker' in navigator) || !('PushManager' in window)){
     showToast('Push notifications aren\'t supported on this browser'); return;
   }
+  state._pushWorking = true; render();
   try{
     const permission = await Notification.requestPermission();
-    if(permission!=='granted'){ showToast('Notification permission was not granted'); return; }
-    const reg = await navigator.serviceWorker.ready;
-    const subscription = await reg.pushManager.subscribe({
+    if(permission!=='granted'){ showToast('Notification permission was not granted'); state._pushWorking=false; render(); return; }
+    const reg = await withTimeout(navigator.serviceWorker.ready, 8000, 'Service worker setup');
+    const subscription = await withTimeout(reg.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
-    });
+    }), 8000, 'Push subscription');
     const { error } = await sb.from('push_subscriptions').upsert({
       user_id: state._authUser.id,
       subscription: subscription.toJSON(),
@@ -1038,13 +1064,24 @@ async function enablePushNotifications(){
     });
     if(error) throw error;
     state._pushEnabled = true;
+    state._pushWorking = false;
     showToast('Push notifications enabled');
     render();
   }catch(e){
     console.error('push subscribe failed', e);
     if(window.Sentry) Sentry.captureException(e);
+    state._pushWorking = false;
     showToast(`Couldn't enable notifications: ${e.message||e}`);
+    render();
   }
+}
+// Lets you test the ENTIRE pipeline (schedule → Cron → send → service worker → OS
+// notification) in under a minute, without needing to run an actual rest timer — the
+// fastest way to isolate exactly which link in the chain is broken.
+async function sendTestNotification(){
+  if(!state._pushEnabled){ showToast('Enable push notifications first'); return; }
+  await scheduleServerNotification(10, 'Test notification', 'If you see this, push notifications are fully working!');
+  showToast('Test scheduled — should arrive in about 10-25 seconds. Lock your screen or switch apps now.');
 }
 // Fire-and-forget — tells the server exactly when to push, so it still arrives even if the
 // app gets fully closed before the timer would have ended. Failing silently here is fine:
@@ -2410,9 +2447,15 @@ function saveOtherSportLog(){
   if(!sport){ showToast('Pick a sport first'); return; }
   const log = {id:uid(), date:todayISO(), sport};
   if(sport==='Extra Steps'){
-    const steps = Number(state._otherSportSteps)||0;
-    if(steps<=0){ showToast('Enter how many extra steps'); return; }
-    log.extraSteps = steps;
+    const entered = Number(state._otherSportSteps)||0;
+    if(state._otherSportStepsMode==='total'){
+      if(entered<=0){ showToast("Enter today's total step count"); return; }
+      const baseline = Number(state.activityQ.stepsPerDay)||0;
+      log.extraSteps = entered - baseline; // can be negative — a lower-than-usual day genuinely burns less
+    }else{
+      if(entered<=0){ showToast('Enter how many extra steps'); return; }
+      log.extraSteps = entered;
+    }
   }else{
     const minutes = Number(state._otherSportDuration)||0;
     if(minutes<=0){ showToast('Enter how long you did this for'); return; }
@@ -2420,7 +2463,7 @@ function saveOtherSportLog(){
     log.avgHR = state._otherSportHR||'';
   }
   state.otherSportLogs.push(log);
-  state._otherSportPick=''; state._otherSportDuration=''; state._otherSportHR=''; state._otherSportSteps='';
+  state._otherSportPick=''; state._otherSportDuration=''; state._otherSportHR=''; state._otherSportSteps=''; state._otherSportStepsMode='extra';
   saveData(); render();
   showToast(`${sport} logged`);
 }
@@ -2440,10 +2483,23 @@ function otherSportCard(){
       <option value="">Select a sport…</option>
       ${OTHER_SPORTS.map(s=>`<option value="${s}" ${pick===s?'selected':''}>${s}</option>`).join('')}
     </select>
-    ${pick ? (isExtraSteps ? `
-      <label class="tiny muted">Amount of steps on top of the amount you have entered in Setup</label>
-      <input type="text" inputmode="numeric" placeholder="e.g. 3000" value="${state._otherSportSteps}" id="other-sport-steps" style="margin-bottom:10px;">
-    ` : `
+    ${pick ? (isExtraSteps ? (()=>{
+      const baseline = Number(state.activityQ.stepsPerDay)||0;
+      const mode = state._otherSportStepsMode || 'extra';
+      return `
+      <p class="tiny muted" style="margin:0 0 8px 0;">Your Setup baseline: <strong>${baseline||'not set'}</strong> steps/day</p>
+      <div class="row wrap" style="gap:8px;margin-bottom:8px;">
+        <button class="chip small ${mode==='extra'?'active':''}" data-steps-mode="extra">Add extra on top</button>
+        <button class="chip small ${mode==='total'?'active':''}" data-steps-mode="total">Enter today's total instead</button>
+      </div>
+      ${mode==='extra' ? `
+        <label class="tiny muted">Amount of steps on top of your ${baseline||0}/day baseline</label>
+        <input type="text" inputmode="numeric" placeholder="e.g. 3000" value="${state._otherSportSteps}" id="other-sport-steps" style="margin-bottom:10px;">
+      ` : `
+        <label class="tiny muted">Today's actual total step count — disregards your Setup baseline for today only</label>
+        <input type="text" inputmode="numeric" placeholder="e.g. 12000" value="${state._otherSportSteps}" id="other-sport-steps" style="margin-bottom:10px;">
+      `}`;
+    })() : `
       <div class="row wrap" style="gap:10px;margin-bottom:10px;">
         <div style="flex:1;min-width:100px;"><label class="tiny muted">Duration (min)</label><input type="text" inputmode="numeric" value="${state._otherSportDuration}" id="other-sport-duration"></div>
         <div style="flex:1;min-width:100px;"><label class="tiny muted">Avg HR — optional, for more accuracy</label><input type="text" inputmode="numeric" value="${state._otherSportHR}" id="other-sport-hr"></div>
@@ -3362,6 +3418,13 @@ function nutritionTodayTab(){
       <p class="small muted" style="margin-top:0;">Based on your activity logged today (${new Date().toLocaleDateString(undefined,{weekday:'long', month:'long', day:'numeric'})}) — Gym/Run/Bike/Swim/Hyrox sessions specifically from today, using activity type, duration, and your weight. Nothing from other days is included. Adjust the number below if you know it's off.</p>
       <input type="text" inputmode="numeric" placeholder="${autoEstimateTodayBurn()}" value="${state._extraBurnOverride!=null?state._extraBurnOverride:''}" id="extra-burn-input">
       ${burnEstimateRangeNote()}
+    </div>
+
+    <div class="card">
+      <div class="row between">
+        <p class="card-title" style="margin:0;">Your foods</p>
+      </div>
+      ${state.customFoods.length ? state.customFoods.map(f=>foodSearchRow(f)).join('') : `<p class="small muted" style="margin:8px 0 0 0;">No custom foods yet. Add one below via "Don't see it? + Add a food not in the list" and it'll show up here for quick logging next time.</p>`}
     </div>
 
     <div class="card">
@@ -4973,8 +5036,9 @@ function settingsView(){
 
     <div class="card">
       <p class="card-title">Push notifications</p>
-      <p class="small muted" style="margin:0 0 10px 0;">Get a real phone notification when a rest timer finishes — including if you've closed the app, since the server keeps track of the countdown, not just your phone (accurate to about a minute, not the exact second).</p>
-      <button class="btn btn-accent btn-block" id="enable-push-btn">Enable Push Notifications</button>
+      <p class="small muted" style="margin:0 0 10px 0;">Get a real phone notification when a rest timer finishes — including if you've locked your screen or closed the app, since the server keeps track of the countdown, not just your phone (accurate to about 15-30 seconds, not the exact second).</p>
+      <button class="btn ${state._pushEnabled?'btn-accent':'btn-ghost'} btn-block" id="enable-push-btn" style="margin-bottom:${state._pushEnabled?'10':'0'}px;" ${state._pushWorking?'disabled':''}>${state._pushWorking?'Setting up…':state._pushEnabled?'✓ Push Notifications On — tap to re-sync':'Enable Push Notifications'}</button>
+      ${state._pushEnabled?`<button class="btn btn-ghost btn-block" id="send-test-push-btn">Send Test Notification (10s)</button>`:''}
     </div>
 
     <div class="card">
@@ -5092,6 +5156,7 @@ function attachHandlers(){
   if(otherSportHRInput) otherSportHRInput.oninput=()=>{ state._otherSportHR = otherSportHRInput.value; };
   const otherSportStepsInput = document.getElementById('other-sport-steps');
   if(otherSportStepsInput) otherSportStepsInput.oninput=()=>{ state._otherSportSteps = otherSportStepsInput.value; };
+  document.querySelectorAll('[data-steps-mode]').forEach(el=>el.onclick=()=>{ state._otherSportStepsMode=el.dataset.stepsMode; render(); });
   const saveOtherSportBtn = document.getElementById('save-other-sport-btn');
   if(saveOtherSportBtn) saveOtherSportBtn.onclick=saveOtherSportLog;
   document.querySelectorAll('[data-delete-other-sport]').forEach(el=>el.onclick=()=>deleteOtherSportLog(el.dataset.deleteOtherSport));
@@ -5430,6 +5495,8 @@ function attachHandlers(){
   if(toggleRemindersBtn) toggleRemindersBtn.onclick=()=>{ state.remindersEnabled=!state.remindersEnabled; saveData(); render(); };
   const enablePushBtn = document.getElementById('enable-push-btn');
   if(enablePushBtn) enablePushBtn.onclick=enablePushNotifications;
+  const sendTestPushBtn = document.getElementById('send-test-push-btn');
+  if(sendTestPushBtn) sendTestPushBtn.onclick=sendTestNotification;
   const exportDataBtn = document.getElementById('export-data-btn');
   if(exportDataBtn) exportDataBtn.onclick=exportAllDataJSON;
   const deleteDataBtn = document.getElementById('delete-data-btn');
