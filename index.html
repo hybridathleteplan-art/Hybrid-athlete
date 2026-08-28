@@ -969,8 +969,14 @@ function startTimer(seconds, exUid){
   tickTimer();
   // Also tells the server when to push — this is the piece that survives the app being
   // fully closed, not just backgrounded, since the server decides when to fire, not the
-  // client's own (unreliable-once-closed) timer.
-  scheduleServerNotification(seconds, 'Rest complete', exName ? `Time for your next set — ${exName}` : 'Time for your next set');
+  // client's own (unreliable-once-closed) timer. This was previously fire-and-forget with
+  // no error handling at all — if it failed, absolutely nothing would show it, unlike the
+  // test button which already reports failures. Logging it now (silently, not a toast,
+  // since interrupting an active set with an error message would be worse) so a real
+  // failure actually surfaces somewhere we can see it.
+  scheduleServerNotification(seconds, 'Rest complete', exName ? `Time for your next set — ${exName}` : 'Time for your next set')
+    .then(result=>{ if(!result.ok){ console.error('rest timer push scheduling failed:', result.error); if(window.Sentry) Sentry.captureMessage('rest timer push scheduling failed: '+result.error); } })
+    .catch(e=>{ console.error('rest timer push scheduling failed:', e); if(window.Sentry) Sentry.captureException(e); });
 }
 function pauseTimer(){
   state.timer.paused=true;
