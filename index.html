@@ -1094,7 +1094,7 @@ async function scheduleServerNotification(seconds, title, body){
     const token = session ? session.access_token : SUPABASE_ANON_KEY;
     const res = await fetch(`${SUPABASE_URL}/functions/v1/schedule-notification`, {
       method:'POST',
-      headers:{'Content-Type':'application/json', 'Authorization':`Bearer ${token}`},
+      headers:{'Content-Type':'application/json', 'Authorization':`Bearer ${token}`, 'apikey':SUPABASE_ANON_KEY},
       body: JSON.stringify({ seconds, title, body }),
     });
     let data;
@@ -1840,7 +1840,7 @@ async function searchUSDALive(query){
     const token = session ? session.access_token : SUPABASE_ANON_KEY;
     const res = await fetch(`${SUPABASE_URL}/functions/v1/food-search`, {
       method:'POST',
-      headers:{'Content-Type':'application/json', 'Authorization':`Bearer ${token}`},
+      headers:{'Content-Type':'application/json', 'Authorization':`Bearer ${token}`, 'apikey':SUPABASE_ANON_KEY},
       body: JSON.stringify({query}),
     });
     // Read the body regardless of status — the function always returns JSON, even on
@@ -2325,7 +2325,7 @@ async function deleteMyAccount(){
     const token = session ? session.access_token : SUPABASE_ANON_KEY;
     const res = await fetch(`${SUPABASE_URL}/functions/v1/delete-account`, {
       method:'POST',
-      headers:{'Content-Type':'application/json', 'Authorization':`Bearer ${token}`},
+      headers:{'Content-Type':'application/json', 'Authorization':`Bearer ${token}`, 'apikey':SUPABASE_ANON_KEY},
     });
     let data;
     try{ data = await res.json(); }catch(_){ data = null; }
