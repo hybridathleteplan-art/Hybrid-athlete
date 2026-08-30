@@ -454,6 +454,9 @@ let state = {
   _pushEnabled:false,
   _pushWorking:false,
   _editingFoodLogId:null,
+  _showBurnExplanation:false,
+  _showYourFoods:false,
+  _yourFoodsSearch:'',
   _helpExpandedTopics:{},
   onboardingDone:false,
   _onboardingStep:1,
@@ -1154,40 +1157,6 @@ function startNewSession(){
   saveData();
   render();
 }
-function lastPastSession(){
-  return pastGymSessions()[0] || null;
-}
-function repeatLastSession(){
-  const last = lastPastSession(); if(!last) return;
-  const s = {
-    id:uid(), date:todayISO(), active:true, type:'gym',
-    blocks: last.blocks.map(b=>({
-      id:uid(), label:b.label, locked:false,
-      exercises: b.exercises.map(e=>({
-        uid:uid(), exerciseId:e.exerciseId, weighted:e.weighted, notes:'',
-        sets: e.sets.length ? e.sets.map(st=>({weight:st.weight, reps:st.reps, rpe:'', notes:'', filled:false})) : [{weight:'',reps:'',rpe:'',notes:'',filled:false}],
-      })),
-    })),
-  };
-  state.sessions.push(s);
-  state._skipRepeat=false;
-  saveData();
-  render();
-  showToast('Last workout loaded — swap or adjust anything you need');
-}
-function repeatPromptCard(last){
-  const muscles = [...new Set(last.blocks.flatMap(b=>b.exercises.map(e=>exerciseById(e.exerciseId).muscle)))];
-  const exNames = last.blocks.flatMap(b=>b.exercises.map(e=>exerciseById(e.exerciseId).name));
-  return `<div class="card" style="border-color:var(--accent);">
-    <p class="card-title" style="color:var(--accent);">Repeat last workout?</p>
-    <div style="font-weight:600;font-size:15px;margin-bottom:2px;">${fmtDate(last.date)} — ${muscles.join(', ')}</div>
-    <div class="small muted" style="margin-bottom:12px;">${exNames.join(' · ')}</div>
-    <div class="row" style="gap:10px;">
-      <button class="btn btn-ghost" id="dismiss-repeat-btn">Start fresh</button>
-      <button class="btn btn-accent btn-block" id="repeat-session-btn">Load same exercises</button>
-    </div>
-  </div>`;
-}
 function addExerciseToSession(exId, opts){
   opts = opts||{};
   const s = pickerTargetSession(); if(!s) return;
@@ -1299,7 +1268,6 @@ function finishSession(){
   if(minutes<=0){ showToast('Enter how long this session took — needed to estimate calories burned'); return; }
   s.active=false;
   s.durationMin = minutes;
-  state._skipRepeat=false;
   state.builderMuscles=[];
   state._activeSupersetBlock=null;
   state._logChoice=null;
@@ -1310,7 +1278,6 @@ function finishSession(){
 }
 function discardSession(){
   state.sessions = state.sessions.filter(s=>!s.active);
-  state._skipRepeat=false;
   state.builderMuscles=[];
   state._activeSupersetBlock=null;
   state._logChoice=null;
@@ -1995,6 +1962,23 @@ function autoEstimateTodayBurn(){
   todaysOtherSports.forEach(l=>{ kcal += calorieBurnForOtherSportLog(l, w); });
   return Math.round(kcal);
 }
+function autoEstimateTodayBurnBreakdown(){
+  const w = currentWeightKg(); if(!w) return [];
+  const items = [];
+  cardioSessions().filter(s=>dateKey(s.date)===todayKey()).forEach(s=>{
+    items.push({label:`${DISCIPLINE_LABELS[s.discipline]||s.discipline}${s.cardioType?' — '+s.cardioType:''}`, kcal:Math.round(calorieBurnForCardioSession(s,w))});
+  });
+  pastGymSessions().filter(s=>dateKey(s.date)===todayKey()).forEach(s=>{
+    items.push({label:'Gym session', kcal:Math.round(calorieBurnForGymSession(s,w))});
+  });
+  pastHyroxSessions().filter(s=>dateKey(s.date)===todayKey()).forEach(s=>{
+    items.push({label:'Hyrox', kcal:Math.round(calorieBurnForHyroxSession(s,w))});
+  });
+  state.otherSportLogs.filter(l=>dateKey(l.date)===todayKey()).forEach(l=>{
+    items.push({label:l.sport, kcal:Math.round(calorieBurnForOtherSportLog(l,w))});
+  });
+  return items.filter(i=>i.kcal!==0);
+}
 function autoEstimateTodayBurnRange(){
   const mid = autoEstimateTodayBurn();
   return {low:Math.max(0, Math.round(mid-BURN_ESTIMATE_UNCERTAINTY_KCAL)), mid, high:Math.round(mid+BURN_ESTIMATE_UNCERTAINTY_KCAL)};
@@ -2597,11 +2581,8 @@ function cardioTypeScreen(discipline){
 }
 
 function startScreen(){
-  const last = lastPastSession();
-  const showRepeatPrompt = last && !state._skipRepeat;
   const muscleRepeatGroups = repeatByMuscleData();
   return `
-    ${showRepeatPrompt ? repeatPromptCard(last) : ''}
     <div class="card">
       <div class="row between" style="align-items:flex-start;">
         <button class="btn btn-ghost btn-sm" id="back-to-log-choice">Back</button>
@@ -3448,14 +3429,28 @@ function nutritionTodayTab(){
       <p class="card-title">Extra calories burned today</p>
       <p class="small muted" style="margin-top:0;">Based on your activity logged today (${new Date().toLocaleDateString(undefined,{weekday:'long', month:'long', day:'numeric'})}) — Gym/Run/Bike/Swim/Hyrox sessions specifically from today, using activity type, duration, and your weight. Nothing from other days is included. Adjust the number below if you know it's off.</p>
       <input type="text" inputmode="numeric" placeholder="${autoEstimateTodayBurn()}" value="${state._extraBurnOverride!=null?state._extraBurnOverride:''}" id="extra-burn-input">
+      ${(()=>{
+        const items = autoEstimateTodayBurnBreakdown();
+        if(!items.length) return '';
+        return `<div style="margin-top:10px;">
+          ${items.map(i=>`<div class="row between tiny muted" style="padding:3px 0;"><span>${i.label}</span><span class="mono">${i.kcal.toLocaleString()} kcal</span></div>`).join('')}
+        </div>`;
+      })()}
       ${burnEstimateRangeNote()}
     </div>
 
     <div class="card">
-      <div class="row between">
-        <p class="card-title" style="margin:0;">Your foods</p>
+      <div class="row between" data-toggle-your-foods style="cursor:pointer;">
+        <p class="card-title" style="margin:0;">Your foods ${state.customFoods.length?`(${state.customFoods.length})`:''}</p>
+        <span class="tiny muted">${state._showYourFoods?'▲':'▼'}</span>
       </div>
-      ${state.customFoods.length ? state.customFoods.map(f=>foodSearchRow(f)).join('') : `<p class="small muted" style="margin:8px 0 0 0;">No custom foods yet. Add one below via "Don't see it? + Add a food not in the list" and it'll show up here for quick logging next time.</p>`}
+      ${state._showYourFoods ? (()=>{
+        if(!state.customFoods.length) return `<p class="small muted" style="margin:8px 0 0 0;">No custom foods yet. Add one below via "Don't see it? + Add a food not in the list" and it'll show up here for quick logging next time.</p>`;
+        const q = (state._yourFoodsSearch||'').toLowerCase().trim();
+        const filtered = q ? state.customFoods.filter(f=>f.name.toLowerCase().includes(q)) : state.customFoods;
+        return `<input type="text" placeholder="Search your foods…" value="${state._yourFoodsSearch||''}" id="your-foods-search" style="margin:8px 0 10px 0;">
+          ${filtered.length ? filtered.map(f=>foodSearchRow(f)).join('') : `<p class="small muted" style="margin:0;">No matches for "${state._yourFoodsSearch}".</p>`}`;
+      })() : ''}
     </div>
 
     <div class="card">
@@ -3579,9 +3574,11 @@ function mealBuilderModal(){
 function burnEstimateRangeNote(){
   const r = autoEstimateTodayBurnRange();
   if(r.mid<=0) return '';
+  const expanded = state._showBurnExplanation;
   return `<div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);">
     <div class="row between tiny muted" style="margin-bottom:2px;"><span>Estimated range</span><span class="mono">${r.low}–${r.high} kcal</span></div>
-    <p class="tiny muted" style="margin:6px 0 0 0;">For sessions with a logged avg HR, this uses a heart-rate-based formula (Keytel et al., 2005) — the most personalized estimate available without lab equipment, since it reflects your real effort that day rather than a generic assumption. Without HR, it falls back to a per-workout-type intensity estimate (an interval session is rated differently than a recovery session), and for gym sessions specifically, it's also scaled by how many sets you actually logged relative to the session length — a handful of sets over an hour is mostly rest, not continuous effort, so it's no longer charged like one. Either way, it's still an estimate — the ±150 kcal shown is a fixed cushion, not a statistical guarantee, so log your avg HR when you can for the more reliable number.</p>
+    ${expanded ? `<p class="tiny muted" style="margin:6px 0 6px 0;">For sessions with a logged avg HR, this uses a heart-rate-based formula (Keytel et al., 2005) — the most personalized estimate available without lab equipment, since it reflects your real effort that day rather than a generic assumption. Without HR, it falls back to a per-workout-type intensity estimate (an interval session is rated differently than a recovery session), and for gym sessions specifically, it's also scaled by how many sets you actually logged relative to the session length — a handful of sets over an hour is mostly rest, not continuous effort, so it's no longer charged like one. Either way, it's still an estimate — the ±150 kcal shown is a fixed cushion, not a statistical guarantee, so log your avg HR when you can for the more reliable number.</p>` : ''}
+    <button class="btn btn-ghost btn-sm" id="toggle-burn-explanation">${expanded?'Show less':'What does this mean? +'}</button>
   </div>`;
 }
 function macroDonut(totals, targets, budget){
@@ -5470,10 +5467,6 @@ function attachHandlers(){
     else if(!activeSession()) startNewSession();
   };
 
-  const repeatBtn = document.getElementById('repeat-session-btn');
-  if(repeatBtn) repeatBtn.onclick=repeatLastSession;
-  const dismissRepeatBtn = document.getElementById('dismiss-repeat-btn');
-  if(dismissRepeatBtn) dismissRepeatBtn.onclick=()=>{ state._skipRepeat=true; render(); };
   const loadMuscleRepeatBtn = document.getElementById('load-muscle-repeat-btn');
   if(loadMuscleRepeatBtn) loadMuscleRepeatBtn.onclick=loadMuscleRepeat;
 
@@ -5839,6 +5832,12 @@ function attachHandlers(){
 
   const extraBurnInput = document.getElementById('extra-burn-input');
   if(extraBurnInput) extraBurnInput.oninput=()=>{ state._extraBurnOverride = extraBurnInput.value===''?null:extraBurnInput.value; render(); };
+  const toggleBurnExplanation = document.getElementById('toggle-burn-explanation');
+  if(toggleBurnExplanation) toggleBurnExplanation.onclick=()=>{ state._showBurnExplanation=!state._showBurnExplanation; render(); };
+  const toggleYourFoods = document.querySelector('[data-toggle-your-foods]');
+  if(toggleYourFoods) toggleYourFoods.onclick=()=>{ state._showYourFoods=!state._showYourFoods; render(); };
+  const yourFoodsSearch = document.getElementById('your-foods-search');
+  if(yourFoodsSearch) yourFoodsSearch.oninput=()=>{ state._yourFoodsSearch=yourFoodsSearch.value; render(); };
 
   const saveWeightBtn = document.getElementById('save-weight-btn');
   if(saveWeightBtn) saveWeightBtn.onclick=()=>{
