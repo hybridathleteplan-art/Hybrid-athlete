@@ -453,6 +453,7 @@ let state = {
   _otherSportStepsMode:'extra',
   _pushEnabled:false,
   _pushWorking:false,
+  _editingFoodLogId:null,
   _helpExpandedTopics:{},
   onboardingDone:false,
   _onboardingStep:1,
@@ -1763,6 +1764,23 @@ function addFoodLog(foodId, grams){
 }
 function removeFoodLog(id){
   state.foodLogs = state.foodLogs.filter(f=>f.id!==id);
+  saveData(); render();
+}
+function updateFoodLogGrams(id, newGrams){
+  const log = state.foodLogs.find(f=>f.id===id);
+  if(!log || !log.grams) return;
+  const g = Number(newGrams); if(!g || g<=0) return;
+  const ratio = g/log.grams;
+  log.cal = Math.round(log.cal*ratio);
+  log.protein = Math.round(log.protein*ratio*10)/10;
+  log.carbs = Math.round(log.carbs*ratio*10)/10;
+  log.fat = Math.round(log.fat*ratio*10)/10;
+  log.grams = g;
+  saveData(); render();
+}
+function updateFoodLogField(id, field, value){
+  const log = state.foodLogs.find(f=>f.id===id); if(!log) return;
+  log[field] = Number(value)||0;
   saveData(); render();
 }
 function saveCustomFood(name, cal, protein, carbs, fat){
@@ -3422,10 +3440,8 @@ function nutritionTodayTab(){
     <div class="card" style="border-color:var(--accent);">
       <p class="card-title" style="color:var(--accent);">Remaining today</p>
       <div class="mono" style="font-size:32px;font-weight:700;">${remaining.toLocaleString()}<span class="tiny muted"> kcal</span></div>
-      <div class="tiny muted" style="margin-bottom:12px;">${Math.round(totals.cal)} eaten of ${budget.toLocaleString()} kcal budget (${targets.calories.toLocaleString()} target + ${extraBurn.toLocaleString()} extra burn)</div>
-      ${macroBar('Protein', totals.protein, targets.proteinG)}
-      ${macroBar('Carbs', totals.carbs, targets.carbG)}
-      ${macroBar('Fat', totals.fat, targets.fatG)}
+      <div class="tiny muted" style="margin-bottom:4px;">${Math.round(totals.cal)} eaten of ${budget.toLocaleString()} kcal budget (${targets.calories.toLocaleString()} target + ${extraBurn.toLocaleString()} extra burn)</div>
+      ${macroDonut(totals, targets, budget)}
     </div>
 
     <div class="card">
@@ -3484,15 +3500,35 @@ function nutritionTodayTab(){
         const cap = 6;
         const showAll = state._showAllFoodLog || logs.length<=cap;
         const visible = showAll ? logs : logs.slice(0,cap);
-        return visible.map(f=>`
-        <div class="row between" style="padding:8px 0;border-bottom:1px solid var(--border);">
+        return visible.map(f=>{
+          if(state._editingFoodLogId===f.id){
+            return `<div style="padding:8px 0;border-bottom:1px solid var(--border);">
+              <div class="small" style="font-weight:600;margin-bottom:6px;">${f.name}</div>
+              ${f.grams ? `
+                <label class="tiny muted">Grams</label>
+                <input type="text" inputmode="numeric" value="${f.grams}" data-edit-food-grams="${f.id}" style="margin-bottom:8px;">
+              ` : `
+                <div class="row wrap" style="gap:8px;margin-bottom:8px;">
+                  <div style="flex:1;min-width:60px;"><label class="tiny muted">Cal</label><input type="text" inputmode="numeric" value="${f.cal}" data-edit-food-field="cal" data-edit-food-id="${f.id}"></div>
+                  <div style="flex:1;min-width:60px;"><label class="tiny muted">Protein</label><input type="text" inputmode="decimal" value="${f.protein}" data-edit-food-field="protein" data-edit-food-id="${f.id}"></div>
+                  <div style="flex:1;min-width:60px;"><label class="tiny muted">Carbs</label><input type="text" inputmode="decimal" value="${f.carbs}" data-edit-food-field="carbs" data-edit-food-id="${f.id}"></div>
+                  <div style="flex:1;min-width:60px;"><label class="tiny muted">Fat</label><input type="text" inputmode="decimal" value="${f.fat}" data-edit-food-field="fat" data-edit-food-id="${f.id}"></div>
+                </div>
+              `}
+              <button class="btn btn-accent btn-sm" data-done-edit-food="${f.id}">Done</button>
+            </div>`;
+          }
+          return `<div class="row between" style="padding:8px 0;border-bottom:1px solid var(--border);">
           <div>
             <div class="small" style="font-weight:600;">${f.name}</div>
             <div class="tiny muted">${f.grams?f.grams+'g · ':''}${f.cal} kcal · P${f.protein} C${f.carbs} F${f.fat}</div>
           </div>
-          <button class="btn btn-ghost btn-sm" data-remove-food-log="${f.id}">Remove</button>
-        </div>
-      `).join('') + (!showAll ? `<button class="btn btn-ghost btn-sm" id="show-all-food-log-btn" style="margin-top:8px;">Show all ${logs.length}</button>` : '');
+          <div class="row" style="gap:6px;">
+            <button class="btn btn-ghost btn-sm" data-edit-food-log="${f.id}">Edit</button>
+            <button class="btn btn-ghost btn-sm" data-remove-food-log="${f.id}">Remove</button>
+          </div>
+        </div>`;
+        }).join('') + (!showAll ? `<button class="btn btn-ghost btn-sm" id="show-all-food-log-btn" style="margin-top:8px;">Show all ${logs.length}</button>` : '');
       })() : `<p class="small muted" style="margin:4px 0;">Nothing logged yet today.</p>`}
     </div>
 
@@ -3548,14 +3584,51 @@ function burnEstimateRangeNote(){
     <p class="tiny muted" style="margin:6px 0 0 0;">For sessions with a logged avg HR, this uses a heart-rate-based formula (Keytel et al., 2005) — the most personalized estimate available without lab equipment, since it reflects your real effort that day rather than a generic assumption. Without HR, it falls back to a per-workout-type intensity estimate (an interval session is rated differently than a recovery session), and for gym sessions specifically, it's also scaled by how many sets you actually logged relative to the session length — a handful of sets over an hour is mostly rest, not continuous effort, so it's no longer charged like one. Either way, it's still an estimate — the ±150 kcal shown is a fixed cushion, not a statistical guarantee, so log your avg HR when you can for the more reliable number.</p>
   </div>`;
 }
-function macroBar(label, current, target){
-  const pct = target>0 ? Math.min(100, Math.round(current/target*100)) : 0;
-  return `<div style="margin-bottom:8px;">
-    <div class="row between tiny muted" style="margin-bottom:3px;"><span>${label}</span><span>${Math.round(current)}g / ${target}g</span></div>
-    <div class="wearbar"><div class="wearbar-fill" style="width:${pct}%;background:var(--accent);"></div></div>
+function macroDonut(totals, targets, budget){
+  const proteinKcal = totals.protein*4;
+  const carbsKcal = totals.carbs*4;
+  const fatKcal = totals.fat*9;
+  const remaining = Math.max(0, budget - totals.cal);
+  const segments = [
+    {label:'Protein', value:proteinKcal, color:'#5B9BD5', grams:totals.protein, targetG:targets.proteinG},
+    {label:'Carbs', value:carbsKcal, color:'#70AD47', grams:totals.carbs, targetG:targets.carbG},
+    {label:'Fat', value:fatKcal, color:'#FFC000', grams:totals.fat, targetG:targets.fatG},
+    {label:'Remaining', value:remaining, color:'var(--surface-2)', grams:null, targetG:null},
+  ];
+  const totalRing = segments.reduce((s,x)=>s+x.value,0);
+  if(totalRing<=0) return `<p class="small muted" style="margin:6px 0;">Log something to see your macro breakdown.</p>`;
+  const visible = segments.filter(s=>s.value>0);
+  const r=60, cx=70, cy=70, strokeW=20, circumference=2*Math.PI*r;
+  let cumulativeFrac = 0;
+  const arcs = visible.map(seg=>{
+    const frac = seg.value/totalRing;
+    const dash = frac*circumference;
+    const offset = -cumulativeFrac*circumference;
+    cumulativeFrac += frac;
+    return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${seg.color}" stroke-width="${strokeW}" stroke-dasharray="${dash.toFixed(1)} ${(circumference-dash).toFixed(1)}" stroke-dashoffset="${offset.toFixed(1)}" transform="rotate(-90 ${cx} ${cy})"/>`;
+  }).join('');
+  const remainingDisplay = Math.round(budget - totals.cal);
+  return `<div class="row wrap" style="gap:22px;align-items:center;margin-top:8px;">
+    <div style="position:relative;width:140px;height:140px;flex-shrink:0;">
+      <svg viewBox="0 0 140 140" width="140" height="140">
+        <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--surface-2)" stroke-width="${strokeW}"/>
+        ${arcs}
+      </svg>
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;">
+        <div class="mono" style="font-size:20px;font-weight:700;line-height:1;">${remainingDisplay.toLocaleString()}</div>
+        <div class="tiny muted" style="text-transform:uppercase;letter-spacing:0.5px;text-align:center;">${remainingDisplay<0?'over budget':'kcal left'}</div>
+      </div>
+    </div>
+    <div style="flex:1;min-width:160px;">
+      ${segments.filter(s=>s.grams!==null).map(seg=>`
+        <div class="row between" style="margin-bottom:10px;align-items:center;">
+          <span class="small" style="font-weight:600;"><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:${seg.color};margin-right:9px;vertical-align:middle;"></span>${seg.label}</span>
+          <span class="tiny muted">${Math.round(seg.grams)}g / ${seg.targetG}g</span>
+        </div>
+      `).join('')}
+    </div>
   </div>`;
 }
-
 function foodSearchRow(f){
   return `<div class="ex-item">
     <div style="flex:1;">
@@ -3884,8 +3957,13 @@ function exerciseLogView(e, supersetIdx, blockId){
 
   if(collapsed){
     const wUnit = exerciseWeightUnit(e);
-    const filledSets = e.sets.filter(s=>s.filled);
-    const setLines = filledSets.map((s,idx)=> e.weighted
+    // Show any set with an actual value, not just ones the user explicitly retyped — a
+    // pre-filled set left unchanged (same weight as last time) still has real data worth
+    // summarizing, even though `filled` deliberately stays false until confirmed (that
+    // stricter flag is still correct to keep for PR detection and auto-collapse timing;
+    // this summary view just isn't the place that distinction should hide real numbers).
+    const setsWithValues = e.sets.filter(s=> e.weighted ? (s.weight!=='' && s.reps!=='') : s.reps!=='');
+    const setLines = setsWithValues.map((s,idx)=> e.weighted
       ? `Set ${idx+1}: ${toDisplayWeightForUnit(s.weight, wUnit)}${wUnit} × ${s.reps} reps`
       : `Set ${idx+1}: ${s.reps} reps`
     );
@@ -5724,6 +5802,10 @@ function attachHandlers(){
     render();
   };
   document.querySelectorAll('[data-remove-food-log]').forEach(el=>el.onclick=()=>removeFoodLog(el.dataset.removeFoodLog));
+  document.querySelectorAll('[data-edit-food-log]').forEach(el=>el.onclick=()=>{ state._editingFoodLogId=el.dataset.editFoodLog; render(); });
+  document.querySelectorAll('[data-done-edit-food]').forEach(el=>el.onclick=()=>{ state._editingFoodLogId=null; render(); });
+  document.querySelectorAll('[data-edit-food-grams]').forEach(el=>el.onchange=()=>updateFoodLogGrams(el.dataset.editFoodGrams, el.value));
+  document.querySelectorAll('[data-edit-food-field]').forEach(el=>el.onchange=()=>updateFoodLogField(el.dataset.editFoodId, el.dataset.editFoodField, el.value));
   const showAllFoodLogBtn = document.getElementById('show-all-food-log-btn');
   if(showAllFoodLogBtn) showAllFoodLogBtn.onclick=()=>{ state._showAllFoodLog=true; render(); };
   const showAllPRsBtn = document.getElementById('show-all-prs-btn');
