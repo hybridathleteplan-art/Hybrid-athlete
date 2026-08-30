@@ -1007,6 +1007,55 @@ function adjustTimer(delta){
 // Best-effort system notification alongside the chime — the chime can be missed or
 // suspended by the browser when the screen was locked; a real notification is more likely
 // to actually get noticed in that case. Silently does nothing if never granted permission.
+/* ---- Decimal helper for numeric-keypad fields on iOS ----
+   iOS's specialized "decimal" keypad has a long-documented, still-unresolved bug where the
+   period key can be missing or wrong depending on region settings. Using the plain numeric
+   keypad avoids that bug entirely (and is the more practical keypad anyway) — this floating
+   button supplies the one thing that keypad lacks: a reliable way to type a decimal point. */
+let activeDecimalFieldId = null;
+function showDecimalHelper(){
+  let btn = document.getElementById('decimal-helper-btn');
+  if(!btn){
+    btn = document.createElement('button');
+    btn.id = 'decimal-helper-btn';
+    btn.type = 'button';
+    btn.textContent = '.';
+    btn.style.cssText = 'position:fixed;bottom:16px;right:16px;width:48px;height:48px;border-radius:50%;background:var(--accent);color:#000;font-size:22px;font-weight:700;border:none;z-index:200;box-shadow:0 2px 10px rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;';
+    // touchstart/mousedown with preventDefault, not click — this fires before the input
+    // would blur/dismiss the keyboard, so tapping it doesn't lose focus on the real field.
+    btn.addEventListener('mousedown', (e)=>{ e.preventDefault(); insertDecimalPoint(); });
+    btn.addEventListener('touchstart', (e)=>{ e.preventDefault(); insertDecimalPoint(); }, {passive:false});
+    document.body.appendChild(btn);
+  }
+  btn.style.display = 'flex';
+}
+function hideDecimalHelper(){
+  const btn = document.getElementById('decimal-helper-btn');
+  if(btn) btn.style.display = 'none';
+}
+function insertDecimalPoint(){
+  const el = document.getElementById(activeDecimalFieldId);
+  if(!el) return;
+  if(el.value.includes('.')){ el.focus(); return; }
+  const start = el.selectionStart!=null ? el.selectionStart : el.value.length;
+  const end = el.selectionEnd!=null ? el.selectionEnd : el.value.length;
+  el.value = el.value.slice(0,start) + '.' + el.value.slice(end);
+  el.selectionStart = el.selectionEnd = start+1;
+  el.focus();
+  el.dispatchEvent(new Event('input', {bubbles:true}));
+}
+document.addEventListener('focusin', (e)=>{
+  if(e.target.matches && e.target.matches('[data-decimal-field]')){
+    if(!e.target.id) e.target.id = 'decfield_'+uid();
+    activeDecimalFieldId = e.target.id;
+    showDecimalHelper();
+  }
+});
+document.addEventListener('focusout', (e)=>{
+  if(e.target.matches && e.target.matches('[data-decimal-field]')){
+    setTimeout(hideDecimalHelper, 150); // small delay so tapping the button itself still registers first
+  }
+});
 function requestNotificationPermission(){
   if(typeof Notification!=='undefined' && Notification.permission==='default'){
     try{ Notification.requestPermission(); }catch(e){}
@@ -2171,12 +2220,12 @@ function onboardingStep2(){
           const fi = heightCmToFeetIn(p.heightCm);
           return `<div class="row" style="gap:4px;">
             <input type="text" inputmode="numeric" placeholder="ft" value="${fi.feet}" id="onboarding-height-feet" style="width:56px;">
-            <input type="text" inputmode="decimal" placeholder="in" value="${fi.inches}" id="onboarding-height-inches" style="width:56px;">
+            <input type="text" inputmode="numeric" data-decimal-field placeholder="in" value="${fi.inches}" id="onboarding-height-inches" style="width:56px;">
           </div>`;
-        })() : `<input type="text" inputmode="decimal" placeholder="cm" value="${toDisplayHeight(p.heightCm)}" id="onboarding-height">`}
+        })() : `<input type="text" inputmode="numeric" data-decimal-field placeholder="cm" value="${toDisplayHeight(p.heightCm)}" id="onboarding-height">`}
       </div>
       <div style="flex:1;min-width:70px;"><label class="tiny muted">Age</label><input type="text" inputmode="numeric" value="${p.age}" id="onboarding-age"></div>
-      <div style="flex:1;min-width:90px;"><label class="tiny muted">Weight (${unitLabel()})</label><input type="text" inputmode="decimal" id="onboarding-weight"></div>
+      <div style="flex:1;min-width:90px;"><label class="tiny muted">Weight (${unitLabel()})</label><input type="text" inputmode="numeric" data-decimal-field id="onboarding-weight"></div>
     </div>
     <label class="tiny muted" style="display:block;margin-top:10px;">Sex (for the calorie formula)</label>
     <div class="row wrap" style="gap:8px;margin-top:4px;">
@@ -2686,7 +2735,7 @@ function cardioBuilderView(){
 
       ${d.mode==='simple' ? `
         <label class="tiny muted">Distance (${distUnitLabel()})</label>
-        <input type="number" inputmode="decimal" placeholder="0" value="${d.distance}" data-cardio-field="distance" style="margin-bottom:12px;">
+        <input type="text" inputmode="numeric" data-decimal-field placeholder="0" value="${d.distance}" data-cardio-field="distance" style="margin-bottom:12px;">
       ` : `
         <div class="row between" style="margin-bottom:10px;align-items:center;">
           <span class="tiny muted" style="text-transform:uppercase;letter-spacing:0.6px;">Distance unit for warmup/intervals/cooldown</span>
@@ -2696,12 +2745,12 @@ function cardioBuilderView(){
           </div>
         </div>
         <label class="tiny muted">Warmup (${d.intervalUnit})</label>
-        <input type="number" inputmode="decimal" placeholder="0" value="${d.warmupDistance}" data-cardio-field="warmupDistance" style="margin-bottom:12px;">
+        <input type="text" inputmode="numeric" data-decimal-field placeholder="0" value="${d.warmupDistance}" data-cardio-field="warmupDistance" style="margin-bottom:12px;">
 
         <p class="tiny muted" style="text-transform:uppercase;letter-spacing:0.6px;margin-bottom:6px;">Intervals</p>
         ${d.intervals.map((iv,idx)=>`
           <div class="row wrap" style="gap:6px;margin-bottom:8px;align-items:flex-end;">
-            <div style="flex:1;min-width:70px;"><label class="tiny muted">Distance (${d.intervalUnit})</label><input type="number" inputmode="decimal" placeholder="0" value="${iv.distance}" data-interval-field="distance" data-idx="${idx}"></div>
+            <div style="flex:1;min-width:70px;"><label class="tiny muted">Distance (${d.intervalUnit})</label><input type="text" inputmode="numeric" data-decimal-field placeholder="0" value="${iv.distance}" data-interval-field="distance" data-idx="${idx}"></div>
             <div style="flex:1;min-width:60px;"><label class="tiny muted">Reps</label><input type="number" inputmode="numeric" placeholder="0" value="${iv.reps}" data-interval-field="reps" data-idx="${idx}"></div>
             <div style="flex:1;min-width:50px;"><label class="tiny muted">Rest min</label><input type="number" inputmode="numeric" placeholder="0" value="${iv.restM}" data-interval-field="restM" data-idx="${idx}"></div>
             <div style="flex:1;min-width:50px;"><label class="tiny muted">Rest sec</label><input type="number" inputmode="numeric" placeholder="0" value="${iv.restS}" data-interval-field="restS" data-idx="${idx}"></div>
@@ -2712,7 +2761,7 @@ function cardioBuilderView(){
 
         <div>
           <label class="tiny muted">Cooldown (${d.intervalUnit})</label>
-          <input type="number" inputmode="decimal" placeholder="0" value="${d.cooldownDistance}" data-cardio-field="cooldownDistance" style="margin-bottom:8px;">
+          <input type="text" inputmode="numeric" data-decimal-field placeholder="0" value="${d.cooldownDistance}" data-cardio-field="cooldownDistance" style="margin-bottom:8px;">
         </div>
         <div class="small muted" style="margin-bottom:12px;">Total distance: <span class="mono">${fmtDistance(totalDist)} ${distUnitLabel()}</span> (auto-calculated)</div>
       `}
@@ -2901,13 +2950,13 @@ function compactCircuitCard(group, allStations, saved){
               const isPR = st.value!=='' && timeSec>0 && isNewHyroxPRAtStation(allStations, idx, saved?saved.date:undefined);
               const valueAttr = saved ? `data-hyrox-saved-field="value" data-saved-session-id="${saved.sessionId}" data-saved-station-id="${st.id}"` : `data-hyrox-field="value" data-station-id="${st.id}"`;
               const unitAttr = saved ? `data-hyrox-saved-field="unit" data-saved-session-id="${saved.sessionId}" data-saved-station-id="${st.id}"` : `data-hyrox-field="unit" data-station-id="${st.id}"`;
-              const weightAttr = saved ? `data-hyrox-saved-field="weight" data-saved-session-id="${saved.sessionId}" data-saved-station-id="${st.id}"` : `data-hyrox-field="weight" data-station-id="${st.id}"`;
+              const weightAttr = saved ? `data-decimal-field data-hyrox-saved-field="weight" data-saved-session-id="${saved.sessionId}" data-saved-station-id="${st.id}"` : `data-decimal-field data-hyrox-field="weight" data-station-id="${st.id}"`;
               const minsecAttr = saved ? `data-hyrox-saved-minsec="${st.id}" data-saved-session-id="${saved.sessionId}"` : `data-hyrox-minsec="${st.id}"`;
               return `<tr>
                 <td class="mono" style="text-align:center;">${st.roundIndex}</td>
-                <td><input type="text" inputmode="decimal" value="${st.value}" style="width:52px;text-align:center;padding:6px 3px;" ${valueAttr}></td>
+                <td><input type="text" value="${st.value}" style="width:52px;text-align:center;padding:6px 3px;" ${valueAttr}></td>
                 <td>${valueType==='distance'?`<select style="padding:6px 2px;" ${unitAttr}><option value="m" ${st.unit==='m'?'selected':''}>m</option><option value="km" ${st.unit==='km'?'selected':''}>km</option></select>`:`<span class="tiny muted">—</span>`}</td>
-                <td>${hasWeight?`<input type="text" inputmode="decimal" value="${st.weight}" style="width:44px;text-align:center;padding:6px 3px;" ${weightAttr}>`:`<span class="tiny muted">—</span>`}</td>
+                <td>${hasWeight?`<input type="text" inputmode="numeric" value="${st.weight}" style="width:44px;text-align:center;padding:6px 3px;" ${weightAttr}>`:`<span class="tiny muted">—</span>`}</td>
                 <td><input type="text" inputmode="numeric" placeholder="m:ss" value="${formatMinSecText(st.timeM,st.timeS)}" style="width:56px;text-align:center;padding:6px 3px;" ${minsecAttr}></td>
                 <td style="text-align:center;">${isPR?'★':''}</td>
               </tr>`;
@@ -3048,7 +3097,7 @@ function hyroxRoundBuilderModal(){
             ${ct==='emom' ? `<p class="tiny muted" style="margin:0;">Logged per round during the workout — no need to set a value here.</p>` : `
               <div style="flex:1;min-width:70px;">
                 <label class="tiny muted">${st.valueType==='distance'?'Distance':'Reps'}</label>
-                <input type="number" inputmode="decimal" placeholder="0" value="${st.value}" data-round-template-field="value" data-template-id="${st.id}">
+                <input type="number" placeholder="0" value="${st.value}" data-round-template-field="value" data-template-id="${st.id}">
               </div>
               ${st.valueType==='distance'?`
                 <div style="width:70px;">
@@ -3060,7 +3109,7 @@ function hyroxRoundBuilderModal(){
                 </div>
               `:''}
             `}
-            ${HYROX_STATION_HAS_WEIGHT[st.name]?`<div style="width:80px;"><label class="tiny muted">Weight (${unitLabel()})</label><input type="number" inputmode="decimal" placeholder="0" value="${st.weight}" data-round-template-field="weight" data-template-id="${st.id}"></div>`:''}
+            ${HYROX_STATION_HAS_WEIGHT[st.name]?`<div style="width:80px;"><label class="tiny muted">Weight (${unitLabel()})</label><input type="text" inputmode="numeric" placeholder="0" value="${st.weight}" data-decimal-field data-round-template-field="weight" data-template-id="${st.id}"></div>`:''}
           </div>
         </div>`;
       }).join('')}
@@ -3148,7 +3197,7 @@ function hyroxStationCard(st, idx, allStations){
     <div class="row wrap" style="gap:8px;align-items:flex-end;">
       <div style="flex:1;min-width:80px;">
         <label class="tiny muted">${st.valueType==='distance'?'Distance':'Reps'}</label>
-        <input type="number" inputmode="decimal" placeholder="0" value="${st.value}" data-hyrox-field="value" data-station-id="${st.id}">
+        <input type="number" placeholder="0" value="${st.value}" data-hyrox-field="value" data-station-id="${st.id}">
       </div>
       ${st.valueType==='distance'?`
         <div style="width:70px;">
@@ -3159,10 +3208,9 @@ function hyroxStationCard(st, idx, allStations){
           </select>
         </div>
       `:''}
-      <div style="width:60px;"><label class="tiny muted">Min</label><input type="number" inputmode="numeric" placeholder="0" value="${st.timeM}" data-hyrox-field="timeM" data-station-id="${st.id}"></div>
-      <div style="width:60px;"><label class="tiny muted">Sec</label><input type="number" inputmode="numeric" placeholder="0" value="${st.timeS}" data-hyrox-field="timeS" data-station-id="${st.id}"></div>
+      <div style="width:70px;"><label class="tiny muted">Time (m:ss)</label><input type="text" inputmode="numeric" placeholder="0:00" value="${formatMinSecText(st.timeM,st.timeS)}" data-hyrox-minsec="${st.id}"></div>
       ${HYROX_STATION_HAS_WEIGHT[st.name]?`
-        <div style="width:80px;"><label class="tiny muted">Weight (${unitLabel()})</label><input type="number" inputmode="decimal" placeholder="0" value="${st.weight}" data-hyrox-field="weight" data-station-id="${st.id}"></div>
+        <div style="width:80px;"><label class="tiny muted">Weight (${unitLabel()})</label><input type="text" inputmode="numeric" placeholder="0" value="${st.weight}" data-decimal-field data-hyrox-field="weight" data-station-id="${st.id}"></div>
       `:''}
     </div>
     ${pace?`<div class="tiny muted" style="margin-top:8px;">Pace: <span class="mono" style="color:var(--accent);">${pace}</span></div>`:''}
@@ -3175,8 +3223,7 @@ function hyroxRestCard(st, idx){
       <button class="btn btn-ghost btn-sm" data-remove-hyrox-station="${st.id}">✕</button>
     </div>
     <div class="row wrap" style="gap:8px;align-items:flex-end;">
-      <div style="width:70px;"><label class="tiny muted">Min</label><input type="number" inputmode="numeric" placeholder="0" value="${st.timeM}" data-hyrox-field="timeM" data-station-id="${st.id}"></div>
-      <div style="width:70px;"><label class="tiny muted">Sec</label><input type="number" inputmode="numeric" placeholder="0" value="${st.timeS}" data-hyrox-field="timeS" data-station-id="${st.id}"></div>
+      <div style="width:70px;"><label class="tiny muted">Time (m:ss)</label><input type="text" inputmode="numeric" placeholder="0:00" value="${formatMinSecText(st.timeM,st.timeS)}" data-hyrox-minsec="${st.id}"></div>
     </div>
   </div>`;
 }
@@ -3390,10 +3437,32 @@ function nutritionHistoryTab(){
           </div>
         </div>
         ${expanded ? `<div style="padding:6px 0 14px 0;">
-          ${day.logs.map(f=>`<div class="row" style="justify-content:space-between;align-items:flex-start;gap:12px;padding:6px 0;border-bottom:1px solid var(--border);">
-            <span class="small" style="flex:1;min-width:0;">${f.name}</span>
-            <span class="mono tiny muted" style="flex-shrink:0;white-space:nowrap;text-align:right;">${f.grams?f.grams+'g · ':''}${f.cal} kcal</span>
-          </div>`).join('')}
+          ${day.logs.map(f=>{
+            if(state._editingFoodLogId===f.id){
+              return `<div style="padding:8px 0;border-bottom:1px solid var(--border);">
+                <div class="small" style="font-weight:600;margin-bottom:6px;">${f.name}</div>
+                ${f.grams ? `
+                  <label class="tiny muted">Grams</label>
+                  <input type="text" inputmode="numeric" value="${f.grams}" data-edit-food-grams="${f.id}" style="margin-bottom:8px;">
+                ` : `
+                  <div class="row wrap" style="gap:8px;margin-bottom:8px;">
+                    <div style="flex:1;min-width:60px;"><label class="tiny muted">Cal</label><input type="text" inputmode="numeric" value="${f.cal}" data-edit-food-field="cal" data-edit-food-id="${f.id}"></div>
+                    <div style="flex:1;min-width:60px;"><label class="tiny muted">Protein</label><input type="text" inputmode="numeric" data-decimal-field value="${f.protein}" data-edit-food-field="protein" data-edit-food-id="${f.id}"></div>
+                    <div style="flex:1;min-width:60px;"><label class="tiny muted">Carbs</label><input type="text" inputmode="numeric" data-decimal-field value="${f.carbs}" data-edit-food-field="carbs" data-edit-food-id="${f.id}"></div>
+                    <div style="flex:1;min-width:60px;"><label class="tiny muted">Fat</label><input type="text" inputmode="numeric" data-decimal-field value="${f.fat}" data-edit-food-field="fat" data-edit-food-id="${f.id}"></div>
+                  </div>
+                `}
+                <button class="btn btn-accent btn-sm" data-done-edit-food="${f.id}">Done</button>
+              </div>`;
+            }
+            return `<div class="row" style="justify-content:space-between;align-items:flex-start;gap:12px;padding:6px 0;border-bottom:1px solid var(--border);">
+              <span class="small" style="flex:1;min-width:0;">${f.name}<br><span class="tiny muted">${f.grams?f.grams+'g · ':''}${f.cal} kcal · P${f.protein} C${f.carbs} F${f.fat}</span></span>
+              <div class="row" style="gap:6px;flex-shrink:0;">
+                <button class="btn btn-ghost btn-sm" data-edit-food-log="${f.id}">Edit</button>
+                <button class="btn btn-ghost btn-sm" data-remove-food-log="${f.id}">Remove</button>
+              </div>
+            </div>`;
+          }).join('')}
         </div>` : ''}
       </div>`;
     }).join('')}
@@ -3505,9 +3574,9 @@ function nutritionTodayTab(){
               ` : `
                 <div class="row wrap" style="gap:8px;margin-bottom:8px;">
                   <div style="flex:1;min-width:60px;"><label class="tiny muted">Cal</label><input type="text" inputmode="numeric" value="${f.cal}" data-edit-food-field="cal" data-edit-food-id="${f.id}"></div>
-                  <div style="flex:1;min-width:60px;"><label class="tiny muted">Protein</label><input type="text" inputmode="decimal" value="${f.protein}" data-edit-food-field="protein" data-edit-food-id="${f.id}"></div>
-                  <div style="flex:1;min-width:60px;"><label class="tiny muted">Carbs</label><input type="text" inputmode="decimal" value="${f.carbs}" data-edit-food-field="carbs" data-edit-food-id="${f.id}"></div>
-                  <div style="flex:1;min-width:60px;"><label class="tiny muted">Fat</label><input type="text" inputmode="decimal" value="${f.fat}" data-edit-food-field="fat" data-edit-food-id="${f.id}"></div>
+                  <div style="flex:1;min-width:60px;"><label class="tiny muted">Protein</label><input type="text" inputmode="numeric" data-decimal-field value="${f.protein}" data-edit-food-field="protein" data-edit-food-id="${f.id}"></div>
+                  <div style="flex:1;min-width:60px;"><label class="tiny muted">Carbs</label><input type="text" inputmode="numeric" data-decimal-field value="${f.carbs}" data-edit-food-field="carbs" data-edit-food-id="${f.id}"></div>
+                  <div style="flex:1;min-width:60px;"><label class="tiny muted">Fat</label><input type="text" inputmode="numeric" data-decimal-field value="${f.fat}" data-edit-food-field="fat" data-edit-food-id="${f.id}"></div>
                 </div>
               `}
               <button class="btn btn-accent btn-sm" data-done-edit-food="${f.id}">Done</button>
@@ -3651,9 +3720,9 @@ function addFoodFormCard(){
     ${mode==='per100' ? `
       <div class="row wrap" style="gap:8px;">
         <div style="flex:1;min-width:70px;"><label class="tiny muted">Cal/100g</label><input type="number" inputmode="numeric" id="new-food-cal"></div>
-        <div style="flex:1;min-width:70px;"><label class="tiny muted">Protein/100g</label><input type="number" inputmode="numeric" id="new-food-protein"></div>
-        <div style="flex:1;min-width:70px;"><label class="tiny muted">Carbs/100g</label><input type="number" inputmode="numeric" id="new-food-carbs"></div>
-        <div style="flex:1;min-width:70px;"><label class="tiny muted">Fat/100g</label><input type="number" inputmode="numeric" id="new-food-fat"></div>
+        <div style="flex:1;min-width:70px;"><label class="tiny muted">Protein/100g</label><input type="text" inputmode="numeric" data-decimal-field id="new-food-protein"></div>
+        <div style="flex:1;min-width:70px;"><label class="tiny muted">Carbs/100g</label><input type="text" inputmode="numeric" data-decimal-field id="new-food-carbs"></div>
+        <div style="flex:1;min-width:70px;"><label class="tiny muted">Fat/100g</label><input type="text" inputmode="numeric" data-decimal-field id="new-food-fat"></div>
       </div>
     ` : `
       <p class="tiny muted" style="margin:0 0 8px 0;">Enter what's on the label for the WHOLE package, plus its total size — we'll work out the per-100g numbers for you.</p>
@@ -3662,9 +3731,9 @@ function addFoodFormCard(){
         <div style="flex:1;min-width:110px;"><label class="tiny muted">Total calories (optional)</label><input type="number" inputmode="numeric" id="new-food-total-cal" placeholder="auto if blank"></div>
       </div>
       <div class="row wrap" style="gap:8px;">
-        <div style="flex:1;min-width:70px;"><label class="tiny muted">Total protein (g)</label><input type="number" inputmode="numeric" id="new-food-total-protein"></div>
-        <div style="flex:1;min-width:70px;"><label class="tiny muted">Total carbs (g)</label><input type="number" inputmode="numeric" id="new-food-total-carbs"></div>
-        <div style="flex:1;min-width:70px;"><label class="tiny muted">Total fat (g)</label><input type="number" inputmode="numeric" id="new-food-total-fat"></div>
+        <div style="flex:1;min-width:70px;"><label class="tiny muted">Total protein (g)</label><input type="text" inputmode="numeric" data-decimal-field id="new-food-total-protein"></div>
+        <div style="flex:1;min-width:70px;"><label class="tiny muted">Total carbs (g)</label><input type="text" inputmode="numeric" data-decimal-field id="new-food-total-carbs"></div>
+        <div style="flex:1;min-width:70px;"><label class="tiny muted">Total fat (g)</label><input type="text" inputmode="numeric" data-decimal-field id="new-food-total-fat"></div>
       </div>
     `}
     <button class="btn btn-accent btn-block" id="save-new-food-btn" style="margin-top:10px;">Save food</button>
@@ -3688,9 +3757,9 @@ function nutritionSetupTab(){
             const fi = heightCmToFeetIn(p.heightCm);
             return `<div class="row" style="gap:4px;">
               <input type="text" inputmode="numeric" placeholder="ft" value="${fi.feet}" id="nutrition-height-feet" style="width:56px;">
-              <input type="text" inputmode="decimal" placeholder="in" value="${fi.inches}" id="nutrition-height-inches" style="width:56px;">
+              <input type="text" inputmode="numeric" data-decimal-field placeholder="in" value="${fi.inches}" id="nutrition-height-inches" style="width:56px;">
             </div>`;
-          })() : `<input type="text" inputmode="decimal" placeholder="cm" value="${toDisplayHeight(p.heightCm)}" id="nutrition-height-input">`}
+          })() : `<input type="text" inputmode="numeric" data-decimal-field placeholder="cm" value="${toDisplayHeight(p.heightCm)}" id="nutrition-height-input">`}
         </div>
         <div style="flex:1;min-width:80px;"><label class="tiny muted">Age</label><input type="text" inputmode="numeric" value="${p.age}" data-nutrition-profile="age" id="nutrition-age-input"></div>
       </div>
@@ -3738,7 +3807,7 @@ function nutritionSetupTab(){
       ` : ''}
       ${(p.goal==='cut'||p.goal==='bulk') ? `
         <label class="tiny muted" style="display:block;margin-top:10px;">Or set a custom rate (${unitLabel()}/week)</label>
-        <input type="text" inputmode="decimal" value="${toDisplayWeight(p.weeklyRateKg)}" data-nutrition-rate-custom="1" id="nutrition-rate-custom-input">
+        <input type="text" value="${toDisplayWeight(p.weeklyRateKg)}" data-nutrition-rate-custom="1" id="nutrition-rate-custom-input">
       ` : ''}
     </div>
 
@@ -3758,7 +3827,7 @@ function nutritionSetupTab(){
 
       <div style="margin-top:14px;">
         <label class="tiny muted">Protein target (g per lb bodyweight — recommended 0.7–1.0)</label>
-        <input type="text" inputmode="decimal" value="${p.proteinPerLb}" data-nutrition-profile="proteinPerLb" id="nutrition-protein-input" style="margin-bottom:10px;">
+        <input type="text" inputmode="numeric" data-decimal-field value="${p.proteinPerLb}" data-nutrition-profile="proteinPerLb" id="nutrition-protein-input" style="margin-bottom:10px;">
         <label class="tiny muted" id="carb-fat-split-label">Remaining calories — Carbs vs Fat split (${p.carbPct}% carbs / ${100-p.carbPct}% fat)</label>
         <input type="range" min="10" max="90" value="${p.carbPct}" id="carb-pct-slider" class="slider">
       </div>
@@ -3819,7 +3888,7 @@ function nutritionWeightTab(){
     <div class="card">
       <p class="card-title">Log today's weight</p>
       <div class="row" style="gap:10px;">
-        <input type="number" inputmode="decimal" placeholder="0" id="weight-log-input" style="flex:1;">
+        <input type="text" inputmode="numeric" data-decimal-field placeholder="0" id="weight-log-input" style="flex:1;">
         <button class="btn btn-accent" id="save-weight-btn">Save (${unitLabel()})</button>
       </div>
     </div>
@@ -4020,7 +4089,7 @@ function exerciseLogView(e, supersetIdx, blockId){
           const isPR = e.weighted && st.filled && isNewPRAtSet(e.exerciseId, e.sets, idx);
           return `<tr>
             <td class="set-num">${idx+1}</td>
-            ${e.weighted?`<td><input type="number" inputmode="decimal" placeholder="0" value="${toDisplayWeightForUnit(st.weight, exerciseWeightUnit(e))}" data-set-field="weight" data-exuid="${e.uid}" data-idx="${idx}"></td>`:`<td style="text-align:center;font-size:15px;padding:9px 6px;">BW</td>`}
+            ${e.weighted?`<td><input type="text" inputmode="numeric" placeholder="0" value="${toDisplayWeightForUnit(st.weight, exerciseWeightUnit(e))}" data-decimal-field data-set-field="weight" data-exuid="${e.uid}" data-idx="${idx}"></td>`:`<td style="text-align:center;font-size:15px;padding:9px 6px;">BW</td>`}
             <td><input type="number" inputmode="numeric" placeholder="0" value="${st.reps}" data-set-field="reps" data-exuid="${e.uid}" data-idx="${idx}"></td>
             <td><input type="number" inputmode="numeric" min="1" max="10" placeholder="—" value="${st.rpe}" data-set-field="rpe" data-exuid="${e.uid}" data-idx="${idx}" style="width:52px;"></td>
             <td>${isPR?'<span class="pr-badge">★ PR</span>':''}</td>
@@ -4211,8 +4280,7 @@ function hyroxSessionDetail(s){
       return `<div class="card" style="margin-bottom:8px;background:var(--surface-2);">
         <div class="small muted" style="font-weight:600;margin-bottom:6px;">${idx+1}. 💤 Rest</div>
         <div class="row wrap" style="gap:8px;align-items:flex-end;">
-          <div style="width:70px;"><label class="tiny muted">Min</label><input type="number" inputmode="numeric" value="${st.timeM}" data-hyrox-saved-field="timeM" data-saved-session-id="${s.id}" data-saved-station-id="${st.id}"></div>
-          <div style="width:70px;"><label class="tiny muted">Sec</label><input type="number" inputmode="numeric" value="${st.timeS}" data-hyrox-saved-field="timeS" data-saved-session-id="${s.id}" data-saved-station-id="${st.id}"></div>
+          <div style="width:70px;"><label class="tiny muted">Time (m:ss)</label><input type="text" inputmode="numeric" placeholder="0:00" value="${formatMinSecText(st.timeM,st.timeS)}" data-hyrox-saved-minsec="${st.id}" data-saved-session-id="${s.id}"></div>
         </div>
       </div>`;
     }
@@ -4228,10 +4296,9 @@ function hyroxSessionDetail(s){
     return `<div class="card" style="margin-bottom:8px;">
       <div class="small" style="font-weight:600;margin-bottom:6px;">${idx+1}. ${st.name}</div>
       <div class="row wrap" style="gap:8px;align-items:flex-end;">
-        <div style="flex:1;min-width:70px;"><label class="tiny muted">${st.valueType==='distance'?'Distance ('+st.unit+')':'Reps'}</label><input type="number" inputmode="decimal" value="${st.value}" data-hyrox-saved-field="value" data-saved-session-id="${s.id}" data-saved-station-id="${st.id}"></div>
-        <div style="width:60px;"><label class="tiny muted">Min</label><input type="number" inputmode="numeric" value="${st.timeM}" data-hyrox-saved-field="timeM" data-saved-session-id="${s.id}" data-saved-station-id="${st.id}"></div>
-        <div style="width:60px;"><label class="tiny muted">Sec</label><input type="number" inputmode="numeric" value="${st.timeS}" data-hyrox-saved-field="timeS" data-saved-session-id="${s.id}" data-saved-station-id="${st.id}"></div>
-        ${HYROX_STATION_HAS_WEIGHT[st.name]?`<div style="width:80px;"><label class="tiny muted">Weight (${unitLabel()})</label><input type="number" inputmode="decimal" value="${st.weight}" data-hyrox-saved-field="weight" data-saved-session-id="${s.id}" data-saved-station-id="${st.id}"></div>`:''}
+        <div style="flex:1;min-width:70px;"><label class="tiny muted">${st.valueType==='distance'?'Distance ('+st.unit+')':'Reps'}</label><input type="number" value="${st.value}" data-hyrox-saved-field="value" data-saved-session-id="${s.id}" data-saved-station-id="${st.id}"></div>
+        <div style="width:70px;"><label class="tiny muted">Time (m:ss)</label><input type="text" inputmode="numeric" placeholder="0:00" value="${formatMinSecText(st.timeM,st.timeS)}" data-hyrox-saved-minsec="${st.id}" data-saved-session-id="${s.id}"></div>
+        ${HYROX_STATION_HAS_WEIGHT[st.name]?`<div style="width:80px;"><label class="tiny muted">Weight (${unitLabel()})</label><input type="text" inputmode="numeric" value="${st.weight}" data-decimal-field data-hyrox-saved-field="weight" data-saved-session-id="${s.id}" data-saved-station-id="${st.id}"></div>`:''}
       </div>
       ${pace?`<div class="tiny muted" style="margin-top:8px;">Pace: <span class="mono" style="color:var(--accent);">${pace}</span></div>`:''}
     </div>`;
@@ -4326,7 +4393,7 @@ function cardioSessionEditView(s){
       <button class="btn btn-accent btn-sm" data-toggle-edit-session="${s.id}">Done Editing</button>
     </div>
     <div class="row wrap" style="gap:10px;margin-bottom:10px;">
-      <div style="flex:1;"><label class="tiny muted">Distance (${distUnitLabel()})</label><input type="number" inputmode="decimal" value="${toDisplayDistance(s.distance)}" data-cardio-edit="distance" data-session-id="${s.id}"></div>
+      <div style="flex:1;"><label class="tiny muted">Distance (${distUnitLabel()})</label><input type="text" inputmode="numeric" data-decimal-field value="${toDisplayDistance(s.distance)}" data-cardio-edit="distance" data-session-id="${s.id}"></div>
     </div>
     <div class="row wrap" style="gap:8px;margin-bottom:10px;">
       <div style="flex:1;"><label class="tiny muted">Hours</label><input type="number" inputmode="numeric" value="${h||''}" data-cardio-edit="durationH" data-session-id="${s.id}"></div>
@@ -4402,7 +4469,7 @@ function pastExerciseEditView(e, s, blockId){
         ${e.sets.map((st,idx)=>`
           <tr>
             <td class="set-num">${idx+1}</td>
-            ${e.weighted?`<td><input type="number" inputmode="decimal" placeholder="0" value="${toDisplayWeightForUnit(st.weight, exerciseWeightUnit(e))}" data-set-field="weight" data-exuid="${e.uid}" data-idx="${idx}"></td>`:`<td style="text-align:center;font-size:15px;padding:9px 6px;">BW</td>`}
+            ${e.weighted?`<td><input type="text" inputmode="numeric" placeholder="0" value="${toDisplayWeightForUnit(st.weight, exerciseWeightUnit(e))}" data-decimal-field data-set-field="weight" data-exuid="${e.uid}" data-idx="${idx}"></td>`:`<td style="text-align:center;font-size:15px;padding:9px 6px;">BW</td>`}
             <td><input type="number" inputmode="numeric" placeholder="0" value="${st.reps}" data-set-field="reps" data-exuid="${e.uid}" data-idx="${idx}"></td>
             <td><input type="number" inputmode="numeric" min="1" max="10" placeholder="—" value="${st.rpe}" data-set-field="rpe" data-exuid="${e.uid}" data-idx="${idx}" style="width:52px;"></td>
             <td><button class="btn btn-ghost btn-sm" data-remove-set="${e.uid}" data-idx="${idx}">✕</button></td>
@@ -4582,7 +4649,7 @@ function gearAddFormCard(){
         <label class="tiny muted">Name</label>
         <input type="text" id="new-gear-name" placeholder="e.g. Nike Pegasus 40" value="${state._newGearName||''}" style="margin-bottom:10px;">
         <label class="tiny muted">Replace after (${distUnitLabel()})</label>
-        <input type="number" inputmode="decimal" id="new-gear-limit" placeholder="e.g. 500" value="${state._newGearLimit||''}" style="margin-bottom:14px;">
+        <input type="number" id="new-gear-limit" placeholder="e.g. 500" value="${state._newGearLimit||''}" style="margin-bottom:14px;">
         <button class="btn btn-accent btn-block" id="save-new-gear-btn">Save gear</button>
       </div>
     ` : `<p class="small muted" style="margin:8px 0 0 0;">Track wear on shoes, bike parts, or swim gear — set a distance limit and get a color-coded wear bar.</p>`}
