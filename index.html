@@ -2893,7 +2893,7 @@ function compactCircuitCard(group, allStations, saved){
           </div>
         </div>
         <table class="setgrid">
-          <thead><tr><th>Rd</th><th>${valueType==='distance'?'Dist':'Reps'}</th>${valueType==='distance'?'<th>Unit</th>':''}${hasWeight?'<th>Wt</th>':''}<th>Time</th><th></th></tr></thead>
+          <thead><tr><th>Rd</th><th>${valueType==='distance'?'Dist':'Reps'}</th><th>Unit</th><th>Wt</th><th>Time</th><th></th></tr></thead>
           <tbody>
             ${ex.stations.map(st=>{
               const idx = allStations.indexOf(st);
@@ -2906,8 +2906,8 @@ function compactCircuitCard(group, allStations, saved){
               return `<tr>
                 <td class="mono" style="text-align:center;">${st.roundIndex}</td>
                 <td><input type="text" inputmode="decimal" value="${st.value}" style="width:52px;text-align:center;padding:6px 3px;" ${valueAttr}></td>
-                ${valueType==='distance'?`<td><select style="padding:6px 2px;" ${unitAttr}><option value="m" ${st.unit==='m'?'selected':''}>m</option><option value="km" ${st.unit==='km'?'selected':''}>km</option></select></td>`:''}
-                ${hasWeight?`<td><input type="text" inputmode="decimal" value="${st.weight}" style="width:44px;text-align:center;padding:6px 3px;" ${weightAttr}></td>`:''}
+                <td>${valueType==='distance'?`<select style="padding:6px 2px;" ${unitAttr}><option value="m" ${st.unit==='m'?'selected':''}>m</option><option value="km" ${st.unit==='km'?'selected':''}>km</option></select>`:`<span class="tiny muted">—</span>`}</td>
+                <td>${hasWeight?`<input type="text" inputmode="decimal" value="${st.weight}" style="width:44px;text-align:center;padding:6px 3px;" ${weightAttr}>`:`<span class="tiny muted">—</span>`}</td>
                 <td><input type="text" inputmode="numeric" placeholder="m:ss" value="${formatMinSecText(st.timeM,st.timeS)}" style="width:56px;text-align:center;padding:6px 3px;" ${minsecAttr}></td>
                 <td style="text-align:center;">${isPR?'★':''}</td>
               </tr>`;
@@ -3390,9 +3390,9 @@ function nutritionHistoryTab(){
           </div>
         </div>
         ${expanded ? `<div style="padding:6px 0 14px 0;">
-          ${day.logs.map(f=>`<div class="row between small" style="padding:6px 0;border-bottom:1px solid var(--border);">
-            <span>${f.name}</span>
-            <span class="mono tiny muted">${f.grams?f.grams+'g · ':''}${f.cal} kcal</span>
+          ${day.logs.map(f=>`<div class="row" style="justify-content:space-between;align-items:flex-start;gap:12px;padding:6px 0;border-bottom:1px solid var(--border);">
+            <span class="small" style="flex:1;min-width:0;">${f.name}</span>
+            <span class="mono tiny muted" style="flex-shrink:0;white-space:nowrap;text-align:right;">${f.grams?f.grams+'g · ':''}${f.cal} kcal</span>
           </div>`).join('')}
         </div>` : ''}
       </div>`;
