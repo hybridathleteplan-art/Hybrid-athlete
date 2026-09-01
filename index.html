@@ -446,6 +446,7 @@ let state = {
   remindersEnabled:true,  // opt-out for the daily "did you log your workout" email
   readinessLogs:[],       // {id, date, level 1-5} — one-tap daily readiness check-in
   otherSportLogs:[],      // {id, date, sport, durationMin, avgHR, extraSteps} — anything outside Gym/Run/Bike/Swim/Hyrox
+  raceDates:{run:'', bike:'', swim:'', hyrox:''},
   _otherSportPick:'',
   _otherSportDuration:'',
   _otherSportHR:'',
@@ -457,6 +458,9 @@ let state = {
   _viewingGifExerciseId:null,
   _gifLoadState:null,
   _gifWorkoutxId:null,
+  _gifRematchOpen:false,
+  _gifRematchSearch:'',
+  _gifRematchResults:[],
   _showBurnExplanation:false,
   _showYourFoods:false,
   _yourFoodsSearch:'',
@@ -651,6 +655,7 @@ async function loadUserData(){
       state.remindersEnabled = d.remindersEnabled!==false;
       state.readinessLogs = d.readinessLogs||[];
       state.otherSportLogs = d.otherSportLogs||[];
+      state.raceDates = Object.assign({run:'', bike:'', swim:'', hyrox:''}, d.raceDates||{});
       state.onboardingDone = d.onboardingDone===true;
     }
   }catch(e){ console.error('load failed', e); if(window.Sentry) Sentry.captureException(e); }
@@ -664,7 +669,7 @@ function buildSavePayload(){
     customHyroxStations:state.customHyroxStations,
     distanceUnit:state.distanceUnit, gear:state.gear, gearNotified80:state.gearNotified80,
     nutritionProfile:state.nutritionProfile, activityQ:state.activityQ, weightLogs:state.weightLogs,
-    foodLogs:state.foodLogs, customFoods:state.customFoods, savedMeals:state.savedMeals, remindersEnabled:state.remindersEnabled, readinessLogs:state.readinessLogs, onboardingDone:state.onboardingDone, otherSportLogs:state.otherSportLogs
+    foodLogs:state.foodLogs, customFoods:state.customFoods, savedMeals:state.savedMeals, remindersEnabled:state.remindersEnabled, readinessLogs:state.readinessLogs, onboardingDone:state.onboardingDone, otherSportLogs:state.otherSportLogs, raceDates:state.raceDates
   };
 }
 async function attemptSave(retriesLeft){
@@ -725,6 +730,10 @@ function pastGymSessions(){ return pastSessions().filter(s=>s.type!=='cardio' &&
 function allExercises(){ return EXERCISES.concat(state.customExercises); }
 function sortByName(arr){ return arr.slice().sort((a,b)=>a.name.localeCompare(b.name)); }
 function exerciseById(id){ return allExercises().find(e=>e.id===id); }
+// Matches the account restriction set on exercise_gif_matches in Supabase — keeps the
+// "Fix it" button from showing to anyone whose correction would just get silently
+// rejected, avoiding a confusing "why didn't this save" experience for other users.
+function isAppOwner(){ return state._authUser && state._authUser.id === '82276529-a955-4899-b29b-7e3a3f1b406d'; }
 /* ---- Exercise GIF matching ----
    Fuzzy-matches your exercise names against the cached WorkoutX dataset by word overlap,
    caching the result so this only ever runs once per exercise, not on every view. */
@@ -757,6 +766,9 @@ async function openExerciseGifModal(exId){
   state._viewingGifExerciseId = exId;
   state._gifLoadState = 'loading';
   state._gifWorkoutxId = null;
+  state._gifRematchOpen = false;
+  state._gifRematchSearch = '';
+  state._gifRematchResults = [];
   render();
   const ex = exerciseById(exId);
   try{
@@ -773,6 +785,21 @@ async function openExerciseGifModal(exId){
 }
 function closeExerciseGifModal(){
   state._viewingGifExerciseId = null;
+  render();
+}
+async function searchGifRematch(query){
+  if(!query || query.trim().length<2){ state._gifRematchResults=[]; render(); return; }
+  const { data } = await sb.from('workoutx_exercises').select('id, name').ilike('name', `%${query.trim()}%`).limit(15);
+  state._gifRematchResults = data || [];
+  render();
+}
+async function pickGifRematch(workoutxId){
+  const exId = state._viewingGifExerciseId; if(!exId) return;
+  await sb.from('exercise_gif_matches').upsert({my_exercise_id: exId, workoutx_id: workoutxId});
+  state._gifWorkoutxId = workoutxId;
+  state._gifLoadState = 'found';
+  state._gifRematchOpen = false;
+  state._gifRematchResults = [];
   render();
 }
 function slugify(str){
@@ -2203,6 +2230,7 @@ function render(){
     ${state.focusMode ? focusOverlay() : ''}
     ${state._confirmDiscard ? confirmDiscardModal() : ''}
     ${state._showPicker ? exercisePickerModal() : ''}
+    ${state._viewingGifExerciseId ? exerciseGifModal() : ''}
   `;
   attachHandlers();
   updateTimerDisplay();
@@ -2670,6 +2698,7 @@ function logChoiceScreen(){
 
 function cardioTypeScreen(discipline){
   return `
+    ${raceCountdownBanner(discipline)}
     <div class="card">
       <div class="row between" style="margin-bottom:4px;">
         <p class="card-title" style="margin:0;">${DISCIPLINE_LABELS[discipline]} — pick a workout type</p>
@@ -2749,7 +2778,10 @@ function exercisePickerCard(muscle){
           <div class="ex-name">${ex.name}</div>
           <div class="ex-meta">${ex.weighted?'Weighted':'Bodyweight'}${excluded?` · Excluded because of your ${exclusionReason(ex).toLowerCase()} injury — adjust in Settings`:''}</div>
         </div>
-        ${excluded?`<button class="btn btn-ghost btn-sm" data-override="${ex.id}">Keep anyway</button>`:`<button class="btn ${selected?'btn-accent':'btn-ghost'} btn-sm" data-toggle-multiselect="${ex.id}">${selected?'✓ Selected':'+ Select'}</button>`}
+        <div class="row" style="gap:6px;flex-shrink:0;">
+          <button class="btn btn-ghost btn-sm" data-view-exercise-gif="${ex.id}" title="See demo">▶</button>
+          ${excluded?`<button class="btn btn-ghost btn-sm" data-override="${ex.id}">Keep anyway</button>`:`<button class="btn ${selected?'btn-accent':'btn-ghost'} btn-sm" data-toggle-multiselect="${ex.id}">${selected?'✓ Selected':'+ Select'}</button>`}
+        </div>
       </div>`;
     }).join('')}
   </div>`;
@@ -2766,6 +2798,7 @@ function cardioBuilderView(){
   const gearOptions = gearByDiscipline(d.discipline);
   const totalDist = d.mode==='structured' ? cardioStructuredDistance(d) : (Number(fromDisplayDistance(d.distance))||0);
   return `
+    ${raceCountdownBanner(d.discipline)}
     <div class="card" style="border-color:var(--accent);">
       <div class="row between" style="margin-bottom:4px;">
         <p class="card-title" style="color:var(--accent);margin:0;">${DISCIPLINE_LABELS[d.discipline]} — ${d.cardioType||'pick a type'}</p>
@@ -3185,6 +3218,7 @@ function hyroxBuilderView(){
   const totalSec = hyroxSessionTotalTimeSec({stations:d.stations, manualTotalTimeM:d.manualTotalTimeM, manualTotalTimeS:d.manualTotalTimeS});
   const stationsSumSec = (d.stations||[]).reduce((sum,st)=>sum+stationTimeSec(st),0);
   return `
+    ${raceCountdownBanner('hyrox')}
     <div class="row" style="margin-bottom:14px;">
       <button class="btn btn-ghost btn-sm" id="discard-hyrox-btn">Cancel</button>
     </div>
@@ -3992,6 +4026,23 @@ function dateInputValue(isoString){
   const d = new Date(isoString);
   return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
 }
+// Days until a race date (a plain YYYY-MM-DD string), counting today as day 0. Returns
+// null if no date is set, or a negative number if the date has already passed.
+function daysUntilRace(dateStr){
+  if(!dateStr) return null;
+  const race = new Date(dateStr+'T00:00:00');
+  const today = new Date(); today.setHours(0,0,0,0);
+  return Math.round((race-today)/86400000);
+}
+function raceCountdownBanner(discipline){
+  const dateStr = state.raceDates && state.raceDates[discipline];
+  const days = daysUntilRace(dateStr);
+  if(days===null) return '';
+  const label = days>1 ? `Race in ${days} days` : days===1 ? 'Race tomorrow!' : days===0 ? 'Race day! Good luck!' : `Race was ${Math.abs(days)} day${Math.abs(days)!==1?'s':''} ago`;
+  return `<div class="card" style="border-color:var(--accent);margin-bottom:14px;">
+    <p class="small" style="margin:0;font-weight:600;color:var(--accent);">🏁 ${label}${dateStr?` — ${fmtDate(dateStr+'T00:00:00')}`:''}</p>
+  </div>`;
+}
 // Constructed at noon local time specifically to avoid a date-only input accidentally
 // shifting to the previous/next day when converted through timezone-aware Date math.
 function dateInputToISO(dateStr){
@@ -4188,7 +4239,10 @@ function exercisePickerModal(){
         const selected = state._multiSelectExercises.includes(ex.id);
         return `<div class="ex-item ${excluded?'excluded':''}" >
           <div style="flex:1;"><div class="ex-name">${ex.name}</div><div class="ex-meta">${ex.muscle}${excluded?` · Excluded because of your ${exclusionReason(ex).toLowerCase()} injury — adjust in Settings`:''}</div></div>
-          ${excluded?`<button class="btn btn-ghost btn-sm" data-override="${ex.id}">Keep anyway</button>`:`<button class="btn ${selected?'btn-accent':'btn-ghost'} btn-sm" data-toggle-multiselect="${ex.id}">${selected?'✓ Selected':'+ Select'}</button>`}
+          <div class="row" style="gap:6px;flex-shrink:0;">
+            <button class="btn btn-ghost btn-sm" data-view-exercise-gif="${ex.id}" title="See demo">▶</button>
+            ${excluded?`<button class="btn btn-ghost btn-sm" data-override="${ex.id}">Keep anyway</button>`:`<button class="btn ${selected?'btn-accent':'btn-ghost'} btn-sm" data-toggle-multiselect="${ex.id}">${selected?'✓ Selected':'+ Select'}</button>`}
+          </div>
         </div>`;
       }).join('') : `<p class="small muted" style="padding:10px 0;">No exercises match "${state._pickerSearch}".</p>`}
       <button class="btn btn-ghost btn-block" id="close-picker" style="margin-top:8px;">Close</button>
@@ -4614,7 +4668,6 @@ function renderChart(exId){
 function libraryView(){
   const tab = state._libraryTab || 'exercises';
   return `
-    ${state._viewingGifExerciseId ? exerciseGifModal() : ''}
     <div class="row" style="gap:8px;margin-bottom:14px;">
       <button class="chip ${tab==='exercises'?'active':''}" data-library-tab="exercises">Exercises</button>
       <button class="chip ${tab==='gear'?'active':''}" data-library-tab="gear">Gear</button>
@@ -4626,7 +4679,7 @@ function exerciseGifModal(){
   const ex = exerciseById(state._viewingGifExerciseId);
   const name = ex ? ex.name : '';
   return `<div style="position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:150;display:flex;align-items:center;justify-content:center;padding:20px;" id="gif-modal-backdrop">
-    <div class="card" style="max-width:360px;width:100%;" onclick="event.stopPropagation()">
+    <div class="card" style="max-width:360px;width:100%;max-height:80vh;overflow-y:auto;" onclick="event.stopPropagation()">
       <div class="row between" style="margin-bottom:10px;">
         <p class="card-title" style="margin:0;">${name}</p>
         <button class="btn btn-ghost btn-sm" id="close-gif-modal">✕</button>
@@ -4634,6 +4687,17 @@ function exerciseGifModal(){
       ${state._gifLoadState==='loading' ? `<p class="small muted" style="text-align:center;padding:30px 0;">Looking for a demo…</p>` : ''}
       ${state._gifLoadState==='notfound' ? `<p class="small muted" style="text-align:center;padding:30px 0;">No demo available for this exercise yet.</p>` : ''}
       ${state._gifLoadState==='found' ? `<img src="${SUPABASE_URL}/functions/v1/exercise-gif-proxy?id=${state._gifWorkoutxId}" style="width:100%;border-radius:10px;display:block;" alt="${name} demo">` : ''}
+      ${(state._gifLoadState==='found'||state._gifLoadState==='notfound') && isAppOwner() ? `
+        <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);">
+          ${state._gifRematchOpen ? `
+            <input type="text" id="gif-rematch-search" placeholder="Search for the right exercise…" value="${state._gifRematchSearch||''}" style="margin-bottom:8px;">
+            ${(state._gifRematchResults||[]).map(r=>`<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--border);">
+              <span class="small">${r.name}</span>
+              <button class="btn btn-ghost btn-sm" data-pick-gif-rematch="${r.id}">Use this</button>
+            </div>`).join('')}
+          ` : `<button class="btn btn-ghost btn-sm" id="open-gif-rematch">Wrong exercise? Fix it</button>`}
+        </div>
+      ` : ''}
     </div>
   </div>`;
 }
@@ -4662,10 +4726,7 @@ function exercisesTab(){
           const excluded=isExcluded(ex);
           return `<div class="row between" style="padding:7px 0;border-bottom:1px solid var(--border);${excluded?'opacity:0.5;':''}">
             <span class="small">${ex.name}${ex.custom?' <span class="tiny muted">· yours</span>':''}<span class="tiny muted"> — ${ex.weighted?'weighted':'bodyweight'}${excluded?` · excluded (${exclusionReason(ex).toLowerCase()})`:''}</span></span>
-            <div class="row" style="gap:6px;flex-shrink:0;">
-              <button class="btn btn-ghost btn-sm" data-view-exercise-gif="${ex.id}">▶ Demo</button>
-              ${ex.custom?`<button class="btn btn-ghost btn-sm" data-remove-custom-ex="${ex.id}">Remove</button>`:''}
-            </div>
+            ${ex.custom?`<button class="btn btn-ghost btn-sm" data-remove-custom-ex="${ex.id}">Remove</button>`:''}
           </div>`;
         }).join('') : ''}
       </div>`;
@@ -5265,6 +5326,17 @@ function settingsView(){
     </div>
 
     <div class="card">
+      <p class="card-title">Upcoming races</p>
+      <p class="small muted" style="margin:0 0 10px 0;">Set a race date for any discipline and a countdown reminder shows right at the top when you go to log that discipline.</p>
+      <div class="row wrap" style="gap:10px;">
+        <div style="flex:1;min-width:130px;"><label class="tiny muted">Run</label><input type="date" value="${state.raceDates.run}" data-race-date="run"></div>
+        <div style="flex:1;min-width:130px;"><label class="tiny muted">Bike</label><input type="date" value="${state.raceDates.bike}" data-race-date="bike"></div>
+        <div style="flex:1;min-width:130px;"><label class="tiny muted">Swim</label><input type="date" value="${state.raceDates.swim}" data-race-date="swim"></div>
+        <div style="flex:1;min-width:130px;"><label class="tiny muted">Hyrox</label><input type="date" value="${state.raceDates.hyrox}" data-race-date="hyrox"></div>
+      </div>
+    </div>
+
+    <div class="card">
       <p class="card-title">Push notifications</p>
       <p class="small muted" style="margin:0 0 10px 0;">Get a real phone notification when a rest timer finishes — including if you've locked your screen or closed the app, since the server keeps track of the countdown, not just your phone (accurate to about 15-30 seconds, not the exact second).</p>
       <button class="btn ${state._pushEnabled?'btn-accent':'btn-ghost'} btn-block" id="enable-push-btn" style="margin-bottom:${state._pushEnabled?'10':'0'}px;" ${state._pushWorking?'disabled':''}>${state._pushWorking?'Setting up…':state._pushEnabled?'✓ Push Notifications On — tap to re-sync':'Enable Push Notifications'}</button>
@@ -5719,6 +5791,7 @@ function attachHandlers(){
   if(logoutBtn) logoutBtn.onclick=logOut;
   const toggleRemindersBtn = document.getElementById('toggle-reminders-btn');
   if(toggleRemindersBtn) toggleRemindersBtn.onclick=()=>{ state.remindersEnabled=!state.remindersEnabled; saveData(); render(); };
+  document.querySelectorAll('[data-race-date]').forEach(el=>el.onchange=()=>{ state.raceDates[el.dataset.raceDate]=el.value; saveData(); render(); });
   const enablePushBtn = document.getElementById('enable-push-btn');
   if(enablePushBtn) enablePushBtn.onclick=enablePushNotifications;
   const sendTestPushBtn = document.getElementById('send-test-push-btn');
@@ -5830,6 +5903,11 @@ function attachHandlers(){
   if(closeGifModal) closeGifModal.onclick=closeExerciseGifModal;
   const gifModalBackdrop = document.getElementById('gif-modal-backdrop');
   if(gifModalBackdrop) gifModalBackdrop.onclick=closeExerciseGifModal;
+  const openGifRematch = document.getElementById('open-gif-rematch');
+  if(openGifRematch) openGifRematch.onclick=()=>{ state._gifRematchOpen=true; render(); };
+  const gifRematchSearch = document.getElementById('gif-rematch-search');
+  if(gifRematchSearch) gifRematchSearch.oninput=()=>{ state._gifRematchSearch=gifRematchSearch.value; searchGifRematch(gifRematchSearch.value); };
+  document.querySelectorAll('[data-pick-gif-rematch]').forEach(el=>el.onclick=()=>pickGifRematch(el.dataset.pickGifRematch));
 
   document.querySelectorAll('[data-nutrition-tab]').forEach(el=>el.onclick=()=>{ state._nutritionTab=el.dataset.nutritionTab; render(); });
   const recipeSearchInput = document.getElementById('recipe-search-input');
