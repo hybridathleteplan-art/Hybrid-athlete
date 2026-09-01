@@ -189,7 +189,7 @@ const EXERCISES = [
   // Back
   {id:'lat_pulldown',name:'Lat Pulldown',muscle:'Back',weighted:true,tags:['shoulder']},
   {id:'pull_up',name:'Pull-Up',muscle:'Back',weighted:false,tags:['shoulder','elbow']},
-  {id:'barbell_row',name:'Barbell Row',muscle:'Back',weighted:true,tags:['lower_back']},
+  {id:'barbell_row',name:'Barbell Bent Over Row',muscle:'Back',weighted:true,tags:['lower_back']},
   {id:'seated_cable_row',name:'Seated Cable Row',muscle:'Back',weighted:true,tags:['lower_back']},
   {id:'deadlift',name:'Deadlift',muscle:'Back',weighted:true,tags:['lower_back','knee','hamstring','neck']},
   {id:'tbar_row',name:'T-Bar Row',muscle:'Back',weighted:true,tags:['lower_back']},
@@ -447,6 +447,12 @@ let state = {
   readinessLogs:[],       // {id, date, level 1-5} — one-tap daily readiness check-in
   otherSportLogs:[],      // {id, date, sport, durationMin, avgHR, extraSteps} — anything outside Gym/Run/Bike/Swim/Hyrox
   raceDates:{run:'', bike:'', swim:'', hyrox:''},
+  _nutritionHistoryRange:'week',
+  _nutritionHistoryStart:'',
+  _nutritionHistoryEnd:'',
+  _dashboardDiscipline:'all',
+  _demoCoverageChecking:false,
+  _demoCoverageResults:null,
   _otherSportPick:'',
   _otherSportDuration:'',
   _otherSportHR:'',
@@ -604,6 +610,16 @@ function fmtPace(secPerKm, discipline){
   }
   return fmtDuration(secPerKm) + ' /' + distUnitLabel();
 }
+// The actual pace for one interval specifically — e.g. a 7km tempo effort — separate from
+// the workout's overall pace, which gets diluted by warmup/cooldown/rest and doesn't tell
+// you how fast the actual work portion was.
+function intervalPaceDisplay(iv, discipline, unit){
+  const distVal = Number(iv.distance)||0;
+  const timeSec = (Number(iv.timeM)||0)*60 + (Number(iv.timeS)||0);
+  if(distVal<=0 || timeSec<=0) return '';
+  const distKm = unit==='km' ? distVal : distVal/1000;
+  return fmtPace(timeSec/distKm, discipline);
+}
 // Interval/warmup/cooldown distances use their own m-or-km unit, independent of the km/mi setting
 function toIntervalDisplay(km, unit){
   if(km==='' || km==null) return '';
@@ -733,6 +749,21 @@ function exerciseById(id){ return allExercises().find(e=>e.id===id); }
 // Matches the account restriction set on exercise_gif_matches in Supabase — keeps the
 // "Fix it" button from showing to anyone whose correction would just get silently
 // rejected, avoiding a confusing "why didn't this save" experience for other users.
+async function checkDemoCoverage(){
+  state._demoCoverageChecking = true;
+  state._demoCoverageResults = null;
+  render();
+  const missing = [];
+  for(const ex of allExercises()){
+    try{
+      const workoutxId = await findOrMatchExerciseGif(ex);
+      if(!workoutxId) missing.push(ex);
+    }catch(e){ console.error('coverage check failed for', ex.name, e); }
+  }
+  state._demoCoverageChecking = false;
+  state._demoCoverageResults = missing;
+  render();
+}
 function isAppOwner(){ return state._authUser && state._authUser.id === '82276529-a955-4899-b29b-7e3a3f1b406d'; }
 /* ---- Exercise GIF matching ----
    Fuzzy-matches your exercise names against the cached WorkoutX dataset by word overlap,
@@ -1426,7 +1457,7 @@ function newCardioDraft(discipline){
     logDate: dateInputValue(todayISO()),
     intervalUnit: discipline==='swim' ? 'm' : 'm',  // meters by default — track/pool intervals are usually short
     warmupDistance:'',
-    intervals:[{distance:'', reps:'', restM:'', restS:''}],
+    intervals:[{distance:'', reps:'', restM:'', restS:'', timeM:'', timeS:''}],
     cooldownDistance:'',
   };
 }
@@ -1437,13 +1468,13 @@ function cancelCardioDraft(){
 }
 function addIntervalRow(){
   if(!state._cardioDraft) return;
-  state._cardioDraft.intervals.push({distance:'', reps:'', restM:'', restS:''});
+  state._cardioDraft.intervals.push({distance:'', reps:'', restM:'', restS:'', timeM:'', timeS:''});
   render();
 }
 function removeIntervalRow(idx){
   if(!state._cardioDraft) return;
   state._cardioDraft.intervals.splice(idx,1);
-  if(state._cardioDraft.intervals.length===0) state._cardioDraft.intervals.push({distance:'', reps:'', restM:'', restS:''});
+  if(state._cardioDraft.intervals.length===0) state._cardioDraft.intervals.push({distance:'', reps:'', restM:'', restS:'', timeM:'', timeS:''});
   render();
 }
 function cardioStructuredDistance(draft){
@@ -1481,6 +1512,7 @@ function saveCardioSession(){
     intervals: draft.mode==='structured' ? draft.intervals.map(iv=>({
       distance:Number(fromIntervalDisplay(iv.distance, draft.intervalUnit))||0, reps:Number(iv.reps)||0,
       rest: (Number(iv.restM)||0)*60+(Number(iv.restS)||0),
+      time: (Number(iv.timeM)||0)*60+(Number(iv.timeS)||0),
     })).filter(iv=>iv.distance>0||iv.reps>0) : [],
   };
   state.sessions.push(s);
@@ -2678,8 +2710,16 @@ function readinessCheckInCard(){
     </div>
   </div>`;
 }
+function weightReminderBanner(){
+  if(weightForDate(todayKey())) return ''; // already logged today, nothing to show
+  return `<div class="card" style="border-color:var(--red);background:rgba(228,69,58,0.08);margin-bottom:14px;">
+    <p class="small" style="margin:0;color:var(--red);font-weight:600;">⚠ You haven't entered your weight today</p>
+    <button class="btn btn-ghost btn-sm" id="weight-reminder-log-btn" style="margin-top:8px;">Log it now</button>
+  </div>`;
+}
 function logChoiceScreen(){
   return `
+    ${weightReminderBanner()}
     ${readinessCheckInCard()}
     ${otherSportCard()}
     <div class="card">
@@ -2835,13 +2875,15 @@ function cardioBuilderView(){
 
         <p class="tiny muted" style="text-transform:uppercase;letter-spacing:0.6px;margin-bottom:6px;">Intervals</p>
         ${d.intervals.map((iv,idx)=>`
-          <div class="row wrap" style="gap:6px;margin-bottom:8px;align-items:flex-end;">
+          <div class="row wrap" style="gap:6px;margin-bottom:4px;align-items:flex-end;">
             <div style="flex:1;min-width:70px;"><label class="tiny muted">Distance (${d.intervalUnit})</label><input type="text" inputmode="numeric" data-decimal-field placeholder="0" value="${iv.distance}" data-interval-field="distance" data-idx="${idx}"></div>
             <div style="flex:1;min-width:60px;"><label class="tiny muted">Reps</label><input type="number" inputmode="numeric" placeholder="0" value="${iv.reps}" data-interval-field="reps" data-idx="${idx}"></div>
+            <div style="flex:1;min-width:60px;"><label class="tiny muted">Time (m:ss)</label><input type="text" inputmode="numeric" placeholder="0:00" value="${formatMinSecText(iv.timeM,iv.timeS)}" data-interval-minsec="${idx}"></div>
             <div style="flex:1;min-width:50px;"><label class="tiny muted">Rest min</label><input type="number" inputmode="numeric" placeholder="0" value="${iv.restM}" data-interval-field="restM" data-idx="${idx}"></div>
             <div style="flex:1;min-width:50px;"><label class="tiny muted">Rest sec</label><input type="number" inputmode="numeric" placeholder="0" value="${iv.restS}" data-interval-field="restS" data-idx="${idx}"></div>
             <button class="btn btn-ghost btn-sm" data-remove-interval="${idx}">✕</button>
           </div>
+          ${intervalPaceDisplay(iv, d.discipline, d.intervalUnit) ? `<div class="tiny muted" style="margin-bottom:8px;">Pace for this interval: <span class="mono">${intervalPaceDisplay(iv, d.discipline, d.intervalUnit)}</span></div>` : `<div style="margin-bottom:8px;"></div>`}
         `).join('')}
         <div><button class="btn btn-ghost btn-sm" id="add-interval-btn" style="margin-bottom:16px;">+ Add Interval</button></div>
 
@@ -3040,7 +3082,7 @@ function compactCircuitCard(group, allStations, saved){
               const minsecAttr = saved ? `data-hyrox-saved-minsec="${st.id}" data-saved-session-id="${saved.sessionId}"` : `data-hyrox-minsec="${st.id}"`;
               return `<tr>
                 <td class="mono" style="text-align:center;">${st.roundIndex}</td>
-                <td><input type="text" value="${st.value}" style="width:52px;text-align:center;padding:6px 3px;" ${valueAttr}></td>
+                <td><input type="text" inputmode="numeric" data-decimal-field value="${st.value}" style="width:52px;text-align:center;padding:6px 3px;" ${valueAttr}></td>
                 <td>${valueType==='distance'?`<select style="padding:6px 2px;" ${unitAttr}><option value="m" ${st.unit==='m'?'selected':''}>m</option><option value="km" ${st.unit==='km'?'selected':''}>km</option></select>`:`<span class="tiny muted">—</span>`}</td>
                 <td>${hasWeight?`<input type="text" inputmode="numeric" value="${st.weight}" style="width:44px;text-align:center;padding:6px 3px;" ${weightAttr}>`:`<span class="tiny muted">—</span>`}</td>
                 <td><input type="text" inputmode="numeric" placeholder="m:ss" value="${formatMinSecText(st.timeM,st.timeS)}" style="width:56px;text-align:center;padding:6px 3px;" ${minsecAttr}></td>
@@ -3284,7 +3326,7 @@ function hyroxStationCard(st, idx, allStations){
     <div class="row wrap" style="gap:8px;align-items:flex-end;">
       <div style="flex:1;min-width:80px;">
         <label class="tiny muted">${st.valueType==='distance'?'Distance':'Reps'}</label>
-        <input type="number" placeholder="0" value="${st.value}" data-hyrox-field="value" data-station-id="${st.id}">
+        <input type="text" inputmode="numeric" data-decimal-field placeholder="0" value="${st.value}" data-hyrox-field="value" data-station-id="${st.id}">
       </div>
       ${st.valueType==='distance'?`
         <div style="width:70px;">
@@ -3503,11 +3545,34 @@ function recipeCard(meal){
   </div>`;
 }
 
+function getNutritionHistoryRange(){
+  const now = new Date();
+  let start, end = new Date(now);
+  if(state._nutritionHistoryRange==='custom'){
+    start = state._nutritionHistoryStart ? new Date(state._nutritionHistoryStart) : (()=>{ const d=new Date(now); d.setDate(now.getDate()-7); return d; })();
+    end = state._nutritionHistoryEnd ? new Date(state._nutritionHistoryEnd) : new Date();
+  }else{ start = new Date(now); start.setDate(now.getDate()-7); } // last 7 days (default)
+  start.setHours(0,0,0,0); end.setHours(23,59,59,999);
+  return {start, end};
+}
 function nutritionHistoryTab(){
-  const days = nutritionDaysWithLogs();
-  if(!days.length) return `<div class="empty"><div class="display">No nutrition logged yet</div><div class="small">Log food on the Today tab and it'll show up here, day by day.</div></div>`;
+  const allDays = nutritionDaysWithLogs();
+  if(!allDays.length) return `<div class="empty"><div class="display">No nutrition logged yet</div><div class="small">Log food on the Today tab and it'll show up here, day by day.</div></div>`;
+  const {start, end} = getNutritionHistoryRange();
+  const days = allDays.filter(day=>{ const d=new Date(day.date); return d>=start && d<=end; });
   return `<div class="card">
+    <div class="row wrap" style="gap:8px;margin-bottom:12px;">
+      <button class="chip small ${(state._nutritionHistoryRange||'week')==='week'?'active':''}" data-nutrition-history-range="week">This Week</button>
+      <button class="chip small ${state._nutritionHistoryRange==='custom'?'active':''}" data-nutrition-history-range="custom">Custom Range</button>
+    </div>
+    ${state._nutritionHistoryRange==='custom' ? `
+      <div class="row wrap" style="gap:10px;margin-bottom:14px;">
+        <div style="flex:1;min-width:130px;"><label class="tiny muted">From</label><input type="date" value="${state._nutritionHistoryStart||dateInputValue(start)}" data-nutrition-history-date="start"></div>
+        <div style="flex:1;min-width:130px;"><label class="tiny muted">To</label><input type="date" value="${state._nutritionHistoryEnd||dateInputValue(end)}" data-nutrition-history-date="end"></div>
+      </div>
+    ` : ''}
     <p class="card-title">Daily history</p>
+    ${days.length ? '' : `<p class="small muted" style="margin:0;">No logs in this range.</p>`}
     ${days.map(day=>{
       const t = dayTotals(day.logs);
       const expanded = state._expandedNutritionDay === day.key;
@@ -4324,7 +4389,7 @@ function sessionsTab(sessions){
     </div>
     ${categories.filter(c=>c.list.length).map(c=>`
     <div class="card">
-      <p class="card-title">${c.label} — tap to view details</p>
+      <p style="font-size:18px;font-weight:800;color:var(--accent);margin:0 0 10px 0;">${c.label} <span class="tiny muted" style="font-weight:400;text-transform:none;letter-spacing:normal;">— tap to view details</span></p>
       ${groupByWeek(c.list).map(wk=>{
         let summary;
         if(c.id==='gym') summary = `${wk.sessions.length} session${wk.sessions.length!==1?'s':''}`;
@@ -4360,9 +4425,12 @@ function sessionRow(s){
       : '';
   return `<div>
     <div class="row between" data-toggle-session="${s.id}" style="padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer;">
-      <div>
-        <div style="font-weight:600;font-size:14px;">${fmtDate(s.date)}</div>
-        <div class="tiny muted">${summary}</div>
+      <div class="row" style="gap:8px;align-items:center;">
+        ${expanded?`<span style="width:10px;height:10px;border-radius:2px;background:var(--green);flex-shrink:0;"></span>`:''}
+        <div>
+          <div style="font-weight:600;font-size:14px;">${fmtDate(s.date)}</div>
+          <div class="tiny muted">${summary}</div>
+        </div>
       </div>
       <div class="row" style="gap:8px;flex-wrap:wrap;justify-content:flex-end;max-width:45%;">
         ${rightLabel?`<span class="tiny mono muted" style="text-align:right;">${rightLabel}</span>`:''}
@@ -4403,7 +4471,7 @@ function hyroxSessionDetail(s){
     return `<div class="card" style="margin-bottom:8px;">
       <div class="small" style="font-weight:600;margin-bottom:6px;">${idx+1}. ${st.name}</div>
       <div class="row wrap" style="gap:8px;align-items:flex-end;">
-        <div style="flex:1;min-width:70px;"><label class="tiny muted">${st.valueType==='distance'?'Distance ('+st.unit+')':'Reps'}</label><input type="number" value="${st.value}" data-hyrox-saved-field="value" data-saved-session-id="${s.id}" data-saved-station-id="${st.id}"></div>
+        <div style="flex:1;min-width:70px;"><label class="tiny muted">${st.valueType==='distance'?'Distance ('+st.unit+')':'Reps'}</label><input type="text" inputmode="numeric" data-decimal-field value="${st.value}" data-hyrox-saved-field="value" data-saved-session-id="${s.id}" data-saved-station-id="${st.id}"></div>
         <div style="width:70px;"><label class="tiny muted">Time (m:ss)</label><input type="text" inputmode="numeric" placeholder="0:00" value="${formatMinSecText(st.timeM,st.timeS)}" data-hyrox-saved-minsec="${st.id}" data-saved-session-id="${s.id}"></div>
         ${HYROX_STATION_HAS_WEIGHT[st.name]?`<div style="width:80px;"><label class="tiny muted">Weight (${unitLabel()})</label><input type="text" inputmode="numeric" value="${st.weight}" data-decimal-field data-hyrox-saved-field="weight" data-saved-session-id="${s.id}" data-saved-station-id="${st.id}"></div>`:''}
       </div>
@@ -4482,7 +4550,10 @@ function cardioSessionDetail(s){
       <div class="tiny muted" style="margin-bottom:4px;">Structure</div>
       <div class="small" style="margin-bottom:10px;">
         Warmup: ${fmtDistance(s.warmupDistance)} ${distUnitLabel()}<br>
-        ${s.intervals.map(iv=>`${iv.reps} × ${fmtDistance(iv.distance)} ${distUnitLabel()}, rest ${fmtDuration(iv.rest)}`).join('<br>')}<br>
+        ${s.intervals.map(iv=>{
+          const paceText = iv.time>0 && iv.distance>0 ? ` — ${fmtPace(iv.time/iv.distance, s.discipline)}` : '';
+          return `${iv.reps} × ${fmtDistance(iv.distance)} ${distUnitLabel()}${iv.time>0?` in ${fmtDuration(iv.time)}`:''}${paceText}, rest ${fmtDuration(iv.rest)}`;
+        }).join('<br>')}<br>
         Cooldown: ${fmtDistance(s.cooldownDistance)} ${distUnitLabel()}
       </div>` : ''}
     ${gear?`<div class="small muted" style="margin-bottom:6px;">Gear: ${gear.name}</div>`:''}
@@ -5008,10 +5079,21 @@ function hyroxStationLeaderboard(){
 }
 function dashboardView(){
   const {start, end} = getDashboardRange();
-  const gymList = sessionsInRange(pastGymSessions(), start, end);
-  const cardioList = sessionsInRange(pastCardioSessions(), start, end);
-  const hyroxList = sessionsInRange(pastHyroxSessions(), start, end);
-  const hyroxRunEntries = sessionsInRange(hyroxRunLikeCardioEntries(), start, end);
+  const disciplineFilter = state._dashboardDiscipline || 'all';
+  let gymList = sessionsInRange(pastGymSessions(), start, end);
+  let cardioList = sessionsInRange(pastCardioSessions(), start, end);
+  let hyroxList = sessionsInRange(pastHyroxSessions(), start, end);
+  let hyroxRunEntries = sessionsInRange(hyroxRunLikeCardioEntries(), start, end);
+  // Zeroing out irrelevant lists here (rather than touching every card below) works because
+  // most cards already hide themselves when their list is empty — filtering upstream makes
+  // the whole dashboard scope to one discipline without needing to special-case each card.
+  if(disciplineFilter==='gym'){ cardioList=[]; hyroxList=[]; hyroxRunEntries=[]; }
+  else if(disciplineFilter==='hyrox'){ gymList=[]; cardioList=[]; hyroxRunEntries=[]; }
+  else if(['run','bike','swim'].includes(disciplineFilter)){
+    gymList=[]; hyroxList=[];
+    cardioList = cardioList.filter(s=>s.discipline===disciplineFilter);
+    if(disciplineFilter!=='run') hyroxRunEntries=[];
+  }
 
   const muscleCounts = {};
   gymList.forEach(s=>{
@@ -5041,6 +5123,15 @@ function dashboardView(){
           <div style="flex:1;min-width:140px;"><label class="tiny muted">To</label><input type="date" id="dashboard-end" value="${state._dashboardEnd||''}"></div>
         </div>
       ` : `<p class="tiny muted" style="margin:0;">${fmtDate(start)} – ${fmtDate(end)}</p>`}
+    </div>
+
+    <div class="card">
+      <p class="card-title">Discipline</p>
+      <div class="row wrap" style="gap:8px;">
+        ${[['all','All'],['gym','Gym'],['run','Run'],['bike','Bike'],['swim','Swim'],['hyrox','Hyrox']].map(([id,label])=>
+          `<button class="chip small ${disciplineFilter===id?'active':''}" data-dashboard-discipline="${id}">${label}</button>`
+        ).join('')}
+      </div>
     </div>
 
     ${(()=>{
@@ -5092,7 +5183,14 @@ function dashboardView(){
     <div class="card">
       <p class="card-title">Endurance</p>
       <div class="mono" style="font-size:22px;font-weight:700;">${cardioList.length}</div>
-      <div class="tiny muted" style="margin-bottom:4px;">session${cardioList.length!==1?'s':''} in this range · ${fmtDistance(cardioList.reduce((s,x)=>s+(Number(x.distance)||0),0)+hyroxRunEntries.reduce((s,x)=>s+(Number(x.distance)||0),0))} ${distUnitLabel()} total · ${fmtHours(cardioList.reduce((s,x)=>s+(Number(x.duration)||0),0)+hyroxRunEntries.reduce((s,x)=>s+(Number(x.duration)||0),0))} total</div>
+      <div class="tiny muted" style="margin-bottom:10px;">session${cardioList.length!==1?'s':''} in this range · ${fmtDistance(cardioList.reduce((s,x)=>s+(Number(x.distance)||0),0)+hyroxRunEntries.reduce((s,x)=>s+(Number(x.distance)||0),0))} ${distUnitLabel()} total · ${fmtHours(cardioList.reduce((s,x)=>s+(Number(x.duration)||0),0)+hyroxRunEntries.reduce((s,x)=>s+(Number(x.duration)||0),0))} total</div>
+      <div class="row wrap" style="gap:16px;margin-bottom:10px;">
+        ${['run','bike','swim'].map(d=>{
+          let km = cardioList.filter(s=>s.discipline===d).reduce((s,x)=>s+(Number(x.distance)||0),0);
+          if(d==='run') km += hyroxRunEntries.reduce((s,x)=>s+(Number(x.distance)||0),0);
+          return `<div><div class="tiny muted">${DISCIPLINE_LABELS[d]}</div><div class="mono" style="font-size:16px;font-weight:700;">${fmtDistance(km)} ${distUnitLabel()}</div></div>`;
+        }).join('')}
+      </div>
       ${renderDonut(discSegments)}
     </div>
 
@@ -5325,6 +5423,22 @@ function settingsView(){
       <button class="btn ${state.remindersEnabled?'btn-accent':'btn-ghost'} btn-block" id="toggle-reminders-btn">${state.remindersEnabled?'✓ Reminder emails on':'Reminder emails off'}</button>
     </div>
 
+    ${isAppOwner() ? `<div class="card">
+      <p class="card-title">Exercise demo coverage</p>
+      <p class="small muted" style="margin:0 0 10px 0;">Checks every exercise against the demo database and lists any that don't have a good match yet, so you can fix them directly rather than finding them one at a time.</p>
+      <button class="btn btn-ghost btn-block" id="check-demo-coverage-btn" ${state._demoCoverageChecking?'disabled':''}>${state._demoCoverageChecking?'Checking… (this takes a minute)':'Check Demo Coverage'}</button>
+      ${state._demoCoverageResults ? `
+        <div style="margin-top:10px;">
+          ${state._demoCoverageResults.length ? state._demoCoverageResults.map(ex=>`
+            <div class="row between" style="padding:6px 0;border-bottom:1px solid var(--border);">
+              <span class="small">${ex.name}</span>
+              <button class="btn btn-ghost btn-sm" data-view-exercise-gif="${ex.id}">Fix it</button>
+            </div>
+          `).join('') : `<p class="small muted" style="margin:0;">Every exercise has a demo match. Nothing to fix.</p>`}
+        </div>
+      ` : ''}
+    </div>` : ''}
+
     <div class="card">
       <p class="card-title">Upcoming races</p>
       <p class="small muted" style="margin:0 0 10px 0;">Set a race date for any discipline and a countdown reminder shows right at the top when you go to log that discipline.</p>
@@ -5511,6 +5625,15 @@ function attachHandlers(){
       if(!state._cardioDraft) return;
       state._cardioDraft.intervals[Number(el.dataset.idx)][el.dataset.intervalField] = el.value;
       recalcCardioPaceDisplay();
+    };
+  });
+  document.querySelectorAll('[data-interval-minsec]').forEach(el=>{
+    el.oninput=()=>{
+      if(!state._cardioDraft) return;
+      const parsed = parseMinSecText(el.value);
+      const iv = state._cardioDraft.intervals[Number(el.dataset.intervalMinsec)];
+      iv.timeM = parsed.m; iv.timeS = parsed.s;
+      render();
     };
   });
   document.querySelectorAll('[data-remove-interval]').forEach(el=>el.onclick=()=>removeIntervalRow(Number(el.dataset.removeInterval)));
@@ -5792,6 +5915,14 @@ function attachHandlers(){
   const toggleRemindersBtn = document.getElementById('toggle-reminders-btn');
   if(toggleRemindersBtn) toggleRemindersBtn.onclick=()=>{ state.remindersEnabled=!state.remindersEnabled; saveData(); render(); };
   document.querySelectorAll('[data-race-date]').forEach(el=>el.onchange=()=>{ state.raceDates[el.dataset.raceDate]=el.value; saveData(); render(); });
+  const weightReminderLogBtn = document.getElementById('weight-reminder-log-btn');
+  if(weightReminderLogBtn) weightReminderLogBtn.onclick=()=>{ state.view='nutrition'; state._nutritionTab='weight'; render(); };
+  document.querySelectorAll('[data-nutrition-history-range]').forEach(el=>el.onclick=()=>{ state._nutritionHistoryRange=el.dataset.nutritionHistoryRange; render(); });
+  document.querySelectorAll('[data-nutrition-history-date]').forEach(el=>el.onchange=()=>{
+    if(el.dataset.nutritionHistoryDate==='start') state._nutritionHistoryStart=el.value;
+    else state._nutritionHistoryEnd=el.value;
+    render();
+  });
   const enablePushBtn = document.getElementById('enable-push-btn');
   if(enablePushBtn) enablePushBtn.onclick=enablePushNotifications;
   const sendTestPushBtn = document.getElementById('send-test-push-btn');
@@ -6080,6 +6211,9 @@ function attachHandlers(){
   document.querySelectorAll('[data-history-range]').forEach(el=>el.onclick=()=>{ state._historyRangeFilter=el.dataset.historyRange; render(); });
 
   document.querySelectorAll('[data-dashboard-range]').forEach(el=>el.onclick=()=>{ state._dashboardRange=el.dataset.dashboardRange; render(); });
+  document.querySelectorAll('[data-dashboard-discipline]').forEach(el=>el.onclick=()=>{ state._dashboardDiscipline=el.dataset.dashboardDiscipline; render(); });
+  const checkDemoCoverageBtn = document.getElementById('check-demo-coverage-btn');
+  if(checkDemoCoverageBtn) checkDemoCoverageBtn.onclick=checkDemoCoverage;
   const dashStart = document.getElementById('dashboard-start');
   if(dashStart) dashStart.onchange=()=>{ state._dashboardStart=dashStart.value; render(); };
   const dashEnd = document.getElementById('dashboard-end');
