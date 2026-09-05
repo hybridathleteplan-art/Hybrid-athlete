@@ -1850,8 +1850,8 @@ function removeFoodLog(id){
 // content is passed in with a red "Delete" area revealed as the row is dragged left; past
 // a threshold and releasing deletes it, otherwise it snaps back. The onDelete callback name
 // (not a function reference) is used so this can be embedded in template strings safely.
-function swipeToDeleteWrap(id, contentHtml){
-  return `<div class="swipe-row" data-swipe-id="${id}" style="position:relative;overflow:hidden;">
+function swipeToDeleteWrap(id, contentHtml, swipeClass){
+  return `<div class="swipe-row ${swipeClass}" data-swipe-id="${id}" style="position:relative;overflow:hidden;">
     <div style="position:absolute;inset:0;background:var(--red);display:flex;align-items:center;justify-content:flex-end;padding-right:20px;">
       <span style="color:#fff;font-weight:600;font-size:13px;">Delete</span>
     </div>
@@ -1860,8 +1860,11 @@ function swipeToDeleteWrap(id, contentHtml){
     </div>
   </div>`;
 }
-function attachSwipeToDelete(onDeleteFn){
-  document.querySelectorAll('.swipe-row').forEach(row=>{
+// swipeClass distinguishes which delete action a given swipeable row should trigger — needed
+// since different lists on the same screen (e.g. Today's log vs Your Foods) delete into
+// completely different data, not just one global "delete whatever was swiped" callback.
+function attachSwipeToDelete(swipeClass, onDeleteFn){
+  document.querySelectorAll('.'+swipeClass).forEach(row=>{
     if(row._swipeAttached) return; // avoid double-binding on repeated renders
     row._swipeAttached = true;
     const content = row.querySelector('.swipe-content');
@@ -3619,7 +3622,7 @@ function nutritionHistoryTab(){
                 <button class="btn btn-ghost btn-sm" data-edit-food-log="${f.id}">Edit</button>
                 <button class="btn btn-ghost btn-sm" data-remove-food-log="${f.id}">Remove</button>
               </div>
-            </div>`);
+            </div>`, 'swipe-food-log');
           }).join('')}
         </div>` : ''}
       </div>`;
@@ -3676,7 +3679,7 @@ function nutritionTodayTab(){
         const q = (state._yourFoodsSearch||'').toLowerCase().trim();
         const filtered = q ? state.customFoods.filter(f=>f.name.toLowerCase().includes(q)) : state.customFoods;
         return `<input type="text" placeholder="Search your foods…" value="${state._yourFoodsSearch||''}" id="your-foods-search" style="margin:8px 0 10px 0;">
-          ${filtered.length ? filtered.map(f=>foodSearchRow(f)).join('') : `<p class="small muted" style="margin:0;">No matches for "${state._yourFoodsSearch}".</p>`}`;
+          ${filtered.length ? filtered.map(f=>swipeToDeleteWrap(f.id, foodSearchRow(f), 'swipe-custom-food')).join('') : `<p class="small muted" style="margin:0;">No matches for "${state._yourFoodsSearch}".</p>`}`;
       })() : ''}
     </div>
 
@@ -3702,7 +3705,7 @@ function nutritionTodayTab(){
       <p class="card-title">Log food</p>
       <input type="text" placeholder="Search foods, including branded (e.g. Cheerios)…" id="food-search-input" value="${state._foodSearch||''}" style="margin-bottom:10px;">
 
-      ${matches.length ? `<p class="tiny muted" style="text-transform:uppercase;letter-spacing:0.6px;margin-bottom:4px;">Your list</p>${matches.map(f=>foodSearchRow(f)).join('')}` : ''}
+      ${matches.length ? `<p class="tiny muted" style="text-transform:uppercase;letter-spacing:0.6px;margin-bottom:4px;">Your list</p>${matches.map(f=>f.custom?swipeToDeleteWrap(f.id, foodSearchRow(f), 'swipe-custom-food'):foodSearchRow(f)).join('')}` : ''}
 
       ${search.length>=2 ? `
         <p class="tiny muted" style="text-transform:uppercase;letter-spacing:0.6px;margin:${matches.length?'12px':'0'} 0 4px 0;">Live search (branded &amp; USDA database)</p>
@@ -3749,7 +3752,7 @@ function nutritionTodayTab(){
             <button class="btn btn-ghost btn-sm" data-edit-food-log="${f.id}">Edit</button>
             <button class="btn btn-ghost btn-sm" data-remove-food-log="${f.id}">Remove</button>
           </div>
-        </div>`);
+        </div>`, 'swipe-food-log');
         }).join('') + (!showAll ? `<button class="btn btn-ghost btn-sm" id="show-all-food-log-btn" style="margin-top:8px;">Show all ${logs.length}</button>` : '');
       })() : `<p class="small muted" style="margin:4px 0;">Nothing logged yet today.</p>`}
     </div>
@@ -3852,6 +3855,10 @@ function macroDonut(totals, targets, budget){
       `).join('')}
     </div>
   </div>`;
+}
+function deleteCustomFood(id){
+  state.customFoods = state.customFoods.filter(f=>f.id!==id);
+  saveData(); render();
 }
 function foodSearchRow(f){
   return `<div class="ex-item">
@@ -6147,6 +6154,7 @@ function attachHandlers(){
     state._foodSearch='';
     render();
   });
+  document.querySelectorAll('[data-delete-custom-food]').forEach(el=>el.onclick=()=>deleteCustomFood(el.dataset.deleteCustomFood));
   const openAddFoodBtn = document.getElementById('open-add-food-btn');
   if(openAddFoodBtn) openAddFoodBtn.onclick=()=>{ state._showAddFood=true; render(); };
   const openAddFoodBtnContextual = document.getElementById('open-add-food-btn-contextual');
@@ -6184,7 +6192,8 @@ function attachHandlers(){
     render();
   };
   document.querySelectorAll('[data-remove-food-log]').forEach(el=>el.onclick=()=>removeFoodLog(el.dataset.removeFoodLog));
-  attachSwipeToDelete(removeFoodLog);
+  attachSwipeToDelete('swipe-food-log', removeFoodLog);
+  attachSwipeToDelete('swipe-custom-food', deleteCustomFood);
   document.querySelectorAll('[data-edit-food-log]').forEach(el=>el.onclick=()=>{ state._editingFoodLogId=el.dataset.editFoodLog; render(); });
   document.querySelectorAll('[data-done-edit-food]').forEach(el=>el.onclick=()=>{ state._editingFoodLogId=null; render(); });
   document.querySelectorAll('[data-edit-food-grams]').forEach(el=>el.onchange=()=>updateFoodLogGrams(el.dataset.editFoodGrams, el.value));
