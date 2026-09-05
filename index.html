@@ -407,7 +407,6 @@ let state = {
   _showAllFoodLog:false,
   _showAllPRs:false,
   _showAllDashboardPRs:false,
-  _showAllStationBoard:false,
   _historyRangeFilter:'all',
   _recipeSearch:'',
   _recipeResults:[],
@@ -5102,17 +5101,21 @@ function hyroxFullRaceSessions(hyroxList){
   return hyroxList.filter(s=>(Number(s.manualTotalTimeM)||0)>0 || (Number(s.manualTotalTimeS)||0)>0)
     .sort((a,b)=>new Date(a.date)-new Date(b.date));
 }
-function hyroxStationLeaderboard(){
-  const best = {};
-  pastHyroxSessions().forEach(s=>{
+function hyroxStationSummaryTable(hyroxSessions){
+  const summary = {};
+  HYROX_STATIONS.forEach(name=>{ summary[name] = {count:0, distanceKm:0, timeSec:0, hasDistance:false}; });
+  hyroxSessions.forEach(s=>{
     (s.stations||[]).forEach(st=>{
-      if(st.isRest || st.value==='' || st.value==null) return;
-      const t = stationTimeSec(st); if(t<=0) return;
-      const key = st.name+'|'+st.value+'|'+st.unit;
-      if(!best[key] || t<best[key].timeSec) best[key] = {name:st.name, value:st.value, unit:st.unit, timeSec:t, date:s.date};
+      if(st.isRest || !summary[st.name]) return;
+      summary[st.name].count++;
+      summary[st.name].timeSec += stationTimeSec(st);
+      if(st.valueType==='distance' && st.value!=='' && st.value!=null){
+        summary[st.name].distanceKm += st.unit==='km' ? Number(st.value) : Number(st.value)/1000;
+        summary[st.name].hasDistance = true;
+      }
     });
   });
-  return Object.values(best).sort((a,b)=>a.name.localeCompare(b.name));
+  return HYROX_STATIONS.map(name=>({name, ...summary[name]}));
 }
 function dashboardView(){
   const {start, end} = getDashboardRange();
@@ -5267,25 +5270,20 @@ function dashboardView(){
       </div>`;
     })()}
     ${(()=>{
-      const board = hyroxStationLeaderboard();
-      if(!board.length) return '';
-      const cap = 10;
-      const showAll = state._showAllStationBoard || board.length<=cap;
-      const visible = showAll ? board : board.slice(0,cap);
+      const rows = hyroxStationSummaryTable(hyroxList);
       return `<div class="card">
-        <p class="card-title">Hyrox — station best times</p>
+        <p class="card-title">Hyrox by type</p>
         <table class="setgrid">
-          <thead><tr><th>Station</th><th>At</th><th>Best time</th><th>Date</th></tr></thead>
+          <thead><tr><th>Station</th><th>Times</th><th>Distance</th><th>Time</th></tr></thead>
           <tbody>
-            ${visible.map(b=>`<tr>
-              <td style="font-weight:600;font-size:15px;">${b.name}</td>
-              <td class="mono" style="text-align:center;">${b.value}${b.unit==='reps'?'':' '+b.unit}</td>
-              <td class="mono" style="text-align:center;">${fmtDuration(b.timeSec)}</td>
-              <td class="tiny muted" style="text-align:center;">${fmtDate(b.date)}</td>
+            ${rows.map(r=>`<tr>
+              <td style="font-weight:600;font-size:15px;">${r.name}</td>
+              <td class="mono" style="text-align:center;">${r.count||'—'}</td>
+              <td class="mono" style="text-align:center;">${r.hasDistance ? fmtDistance(r.distanceKm)+' '+distUnitLabel() : '—'}</td>
+              <td class="mono" style="text-align:center;">${r.timeSec>0 ? fmtDuration(r.timeSec) : '—'}</td>
             </tr>`).join('')}
           </tbody>
         </table>
-        ${!showAll ? `<button class="btn btn-ghost btn-sm" id="show-all-station-board-btn" style="margin-top:10px;">Show all ${board.length}</button>` : ''}
       </div>`;
     })()}` : ''}
 
@@ -6197,8 +6195,6 @@ function attachHandlers(){
   if(showAllPRsBtn) showAllPRsBtn.onclick=()=>{ state._showAllPRs=true; render(); };
   const showAllDashboardPRsBtn = document.getElementById('show-all-dashboard-prs-btn');
   if(showAllDashboardPRsBtn) showAllDashboardPRsBtn.onclick=()=>{ state._showAllDashboardPRs=true; render(); };
-  const showAllStationBoardBtn = document.getElementById('show-all-station-board-btn');
-  if(showAllStationBoardBtn) showAllStationBoardBtn.onclick=()=>{ state._showAllStationBoard=true; render(); };
 
   const openMealBuilderBtn = document.getElementById('open-meal-builder-btn');
   if(openMealBuilderBtn) openMealBuilderBtn.onclick=openMealBuilder;
