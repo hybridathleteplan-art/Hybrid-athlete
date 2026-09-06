@@ -1821,8 +1821,12 @@ function nutritionDaysWithLogs(){
   });
   return Object.values(days).sort((a,b)=>new Date(b.date)-new Date(a.date));
 }
+// Accepts either a full ISO timestamp or an already-formatted "YYYY-MM-DD" key (like
+// todayKey() returns) — re-running an already-formatted key through dateKey()/new Date()
+// parses it as UTC midnight, which silently shifts it back a day for anyone west of UTC.
+// Recognizing the key format directly avoids that entirely instead of re-parsing it.
 function weightForDate(dateStr){
-  const key = dateKey(dateStr);
+  const key = /^\d{4}-\d{2}-\d{2}$/.test(dateStr) ? dateStr : dateKey(dateStr);
   const match = state.weightLogs.find(w=>dateKey(w.date)===key);
   return match ? match.weightKg : null;
 }
@@ -3651,7 +3655,11 @@ function nutritionTodayTab(){
     <div class="card" style="border-color:var(--accent);">
       <p class="card-title" style="color:var(--accent);">Remaining today</p>
       <div class="mono" style="font-size:32px;font-weight:700;">${remaining.toLocaleString()}<span class="tiny muted"> kcal</span></div>
-      <div class="tiny muted" style="margin-bottom:4px;">${Math.round(totals.cal)} eaten of ${budget.toLocaleString()} kcal budget (${targets.calories.toLocaleString()} target + ${extraBurn.toLocaleString()} extra burn)</div>
+      <div class="row wrap" style="gap:16px;margin:12px 0 14px 0;">
+        <div class="row" style="gap:6px;align-items:center;"><span style="font-size:17px;">🚩</span><span><div class="tiny muted">Base Goal</div><div class="small mono" style="font-weight:700;">${targets.calories.toLocaleString()}</div></span></div>
+        <div class="row" style="gap:6px;align-items:center;"><span style="font-size:17px;">🍴</span><span><div class="tiny muted">Food</div><div class="small mono" style="font-weight:700;">${Math.round(totals.cal).toLocaleString()}</div></span></div>
+        <div class="row" style="gap:6px;align-items:center;"><span style="font-size:17px;">🔥</span><span><div class="tiny muted">Exercise</div><div class="small mono" style="font-weight:700;">${extraBurn.toLocaleString()}</div></span></div>
+      </div>
       ${macroDonut(totals, targets, budget)}
     </div>
 
@@ -4207,8 +4215,7 @@ function lastSetsSummary(exerciseId, weighted){
   const last = hist[hist.length-1];
   const validSets = last.sets.filter(st=>st.reps!=='' && st.reps!=null && (!weighted || (st.weight!=='' && st.weight!=null)));
   if(!validSets.length) return null;
-  const parts = validSets.map(st=> weighted ? `${toDisplayWeight(st.weight)}×${st.reps}` : `${st.reps} reps`);
-  return {date:last.date, text:parts.join(', ')};
+  return {date:last.date, sets:validSets};
 }
 function exerciseLogView(e, supersetIdx, blockId){
   const ex = exerciseById(e.exerciseId);
@@ -4247,7 +4254,16 @@ function exerciseLogView(e, supersetIdx, blockId){
           ${supersetIdx>=0?`<div class="tiny" style="color:var(--accent);text-transform:uppercase;letter-spacing:0.6px;font-weight:700;margin-bottom:2px;">${ordinal(supersetIdx+1)} exercise of superset</div>`:''}
           <div class="ex-name">${ex.name} ${isPlat?'<span class="plateau-badge">⚠ NO PROGRESS</span>':''}</div>
           <div class="ex-meta">${ex.muscle} ${e.weighted?'· Weighted':'· Bodyweight/Assisted'}</div>
-          ${(()=>{ const last = lastSetsSummary(e.exerciseId, e.weighted); return last ? `<div class="tiny muted" style="margin-top:3px;">Last time (${fmtDate(last.date)}): ${last.text}</div>` : ''; })()}
+          ${(()=>{
+            const last = lastSetsSummary(e.exerciseId, e.weighted); if(!last) return '';
+            const wUnit = exerciseWeightUnit(e);
+            return `<div style="margin-top:8px;padding:8px 10px;background:var(--surface-2);border-radius:8px;border-left:3px solid var(--accent);">
+              <div class="tiny" style="color:var(--accent);font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px;">Last time — ${fmtDate(last.date)}</div>
+              <div class="row wrap" style="gap:6px;">
+                ${last.sets.map(st=>`<span class="small mono" style="font-weight:700;background:var(--bg);padding:3px 8px;border-radius:6px;">${e.weighted?`${toDisplayWeightForUnit(st.weight,wUnit)}${wUnit}×${st.reps}`:`${st.reps} reps`}</span>`).join('')}
+              </div>
+            </div>`;
+          })()}
         </div>
       </div>
       <div class="row" style="gap:6px;">
@@ -4347,7 +4363,6 @@ function focusOverlay(){
   s.blocks.forEach(b=>b.exercises.forEach(e=>{ if(e.uid===state.focusTarget) exObj=e; }));
   if(exObj) ex = exerciseById(exObj.exerciseId);
   return `<div class="focus-overlay">
-    <button class="btn btn-ghost btn-sm" id="exit-focus" style="position:absolute;top:20px;right:20px;">Exit</button>
     <div class="tiny muted" style="text-transform:uppercase;letter-spacing:2px;">Focus Mode</div>
     <div class="focus-exercise">${ex?ex.name:'Rest'}</div>
     <div class="ring" id="ring-fill" style="background:conic-gradient(var(--accent) ${state.timer.total?Math.max(0,state.timer.seconds/state.timer.total)*360:0}deg, var(--surface-2) 0deg);">
@@ -4362,6 +4377,7 @@ function focusOverlay(){
       <button class="btn btn-ghost" data-focus-timer="180">3 min</button>
     </div>
     <button class="btn btn-accent" id="focus-complete" style="margin-top:26px;padding:18px 40px;font-size:17px;">✓ Set Complete</button>
+    <button class="btn btn-ghost" id="exit-focus" style="margin-top:12px;padding:12px 32px;">Exit Focus Mode</button>
   </div>`;
 }
 
