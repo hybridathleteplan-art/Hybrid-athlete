@@ -4217,6 +4217,30 @@ function lastSetsSummary(exerciseId, weighted){
   if(!validSets.length) return null;
   return {date:last.date, sets:validSets};
 }
+// The past session that holds the all-time best set for this exercise — the heaviest weight
+// (ties broken by more reps, then by the more recent session). For bodyweight work, where
+// weight doesn't apply, the best set is simply the most reps. Returned with the full session's
+// sets, so the user sees the whole workout that contained the PR, not just the one set.
+function bestSessionSummary(exerciseId, weighted){
+  const hist = historyForExercise(exerciseId);
+  if(!hist.length) return null;
+  let best=null, bestKey=null;
+  hist.forEach(h=>{
+    const sets = h.sets.filter(st=>st.reps!=='' && st.reps!=null && (!weighted || (st.weight!=='' && st.weight!=null)));
+    if(!sets.length) return;
+    let topW=0, topR=0;
+    sets.forEach(st=>{
+      const w = weighted ? (Number(st.weight)||0) : 0;
+      const r = Number(st.reps)||0;
+      if(w>topW || (w===topW && r>topR)){ topW=w; topR=r; }
+    });
+    const key=[topW,topR];
+    if(!bestKey || key[0]>bestKey[0] || (key[0]===bestKey[0] && key[1]>=bestKey[1])){
+      bestKey=key; best={date:h.date, sets, topWeight:topW, topReps:topR};
+    }
+  });
+  return best;
+}
 function exerciseLogView(e, supersetIdx, blockId){
   const ex = exerciseById(e.exerciseId);
   const isPlat = isPlateaued(e.exerciseId);
@@ -4256,13 +4280,21 @@ function exerciseLogView(e, supersetIdx, blockId){
           <div class="ex-meta">${ex.muscle} ${e.weighted?'· Weighted':'· Bodyweight/Assisted'}</div>
           ${(()=>{
             const last = lastSetsSummary(e.exerciseId, e.weighted); if(!last) return '';
+            const best = bestSessionSummary(e.exerciseId, e.weighted);
             const wUnit = exerciseWeightUnit(e);
-            return `<div style="margin-top:8px;padding:8px 10px;background:var(--surface-2);border-radius:8px;border-left:3px solid var(--accent);">
-              <div class="tiny" style="color:var(--accent);font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px;">Last time — ${fmtDate(last.date)}</div>
-              <div class="row wrap" style="gap:6px;">
-                ${last.sets.map(st=>`<span class="small mono" style="font-weight:700;background:var(--bg);padding:3px 8px;border-radius:6px;">${e.weighted?`${toDisplayWeightForUnit(st.weight,wUnit)}${wUnit}×${st.reps}`:`${st.reps} reps`}</span>`).join('')}
-              </div>
+            const chips = (sets, topW, topR)=> sets.map(st=>{
+              const isTop = e.weighted && Number(st.weight)===topW && Number(st.reps)===topR;
+              const txt = e.weighted ? `${toDisplayWeightForUnit(st.weight,wUnit)}${wUnit}×${st.reps}` : `${st.reps} reps`;
+              return `<span class="small mono" style="font-weight:700;background:var(--bg);padding:3px 8px;border-radius:6px;${isTop?'color:var(--accent);':''}">${txt}${isTop?' ★':''}</span>`;
+            }).join('');
+            const sameDay = best && dateKey(best.date)===dateKey(last.date);
+            const box = (label, date, sets, topW, topR)=>`<div style="margin-top:8px;padding:8px 10px;background:var(--surface-2);border-radius:8px;border-left:3px solid var(--accent);">
+              <div class="tiny" style="color:var(--accent);font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px;">${label} — ${fmtDate(date)}</div>
+              <div class="row wrap" style="gap:6px;">${chips(sets, topW, topR)}</div>
             </div>`;
+            if(!best) return box('Last time', last.date, last.sets, 0, 0);
+            if(sameDay) return box('Last time · your best ★ PR', last.date, best.sets, best.topWeight, best.topReps);
+            return box('Last time', last.date, last.sets, 0, 0) + box('Best session ★ PR', best.date, best.sets, best.topWeight, best.topReps);
           })()}
         </div>
       </div>
